@@ -1,18 +1,27 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
-import { Stage, Layer, Rect, Text, Group } from "react-konva"
+import { useMemo, useRef, useState, useEffect, useCallback } from "react"
+import { Stage, Layer, Rect, Text, Group, Line, Circle, Image as KonvaImage } from "react-konva"
+import type Konva from "konva"
 import * as XLSX from "xlsx"
+
+/** =========================
+ *  CONFIG
+ *  ========================= */
+const DEFAULT_BG_URL = "/plano-magma.png"
+
+// Tamaños por defecto (en px del plano)
+const DEFAULT_DMX_SIZE = 28
+const DEFAULT_AUDIO_SIZE = 36
 
 /** =========================
  *  CATÁLOGOS
  *  ========================= */
 
-// DMX (con modos/canales)
 const DMX_CATALOG = {
   "CABEZA MOVIL": {
     label: "Cabeza móvil",
-    color: "#60a5fa",
+    color: "#facc15",
     modes: [
       { id: "16ch", label: "16ch", channels: 16 },
       { id: "17ch", label: "17ch", channels: 17 },
@@ -20,7 +29,7 @@ const DMX_CATALOG = {
   },
   STROBO: {
     label: "Strobo",
-    color: "#ef4444",
+    color: "#22d3ee",
     modes: [
       { id: "9ch", label: "9ch (RGBW)", channels: 9 },
       { id: "4ch", label: "4ch", channels: 4 },
@@ -28,57 +37,62 @@ const DMX_CATALOG = {
   },
   LEDBAR: {
     label: "LED Bar",
-    color: "#10b981",
+    color: "#c084fc",
     modes: [{ id: "16ch", label: "16ch", channels: 16 }],
   },
   CEGADORA: {
     label: "Cegadora",
-    color: "#f59e0b",
+    color: "#22c55e",
     modes: [{ id: "4ch", label: "4ch", channels: 4 }],
   },
   LED: {
     label: "LED",
-    color: "#a78bfa",
+    color: "#c084fc",
     modes: [
       { id: "1ch", label: "1ch (ON/OFF)", channels: 1 },
       { id: "3ch", label: "3ch", channels: 3 },
       { id: "4ch", label: "4ch", channels: 4 },
     ],
   },
+  PAR: {
+    label: "PAR",
+    color: "#c084fc",
+    modes: [
+      { id: "3ch", label: "3ch", channels: 3 },
+      { id: "4ch", label: "4ch", channels: 4 },
+      { id: "7ch", label: "7ch", channels: 7 },
+    ],
+  },
   PCDJ: {
     label: "PCDJ",
-    color: "#22c55e",
+    color: "#3b82f6",
     modes: [{ id: "1ch", label: "1ch", channels: 1 }],
   },
 } as const
-
 type DmxType = keyof typeof DMX_CATALOG
 
-// NO-DMX (pantallas + audio)
 const ND_CATALOG = {
   // PANTALLAS
-  "PANTALLA ESCENARIO": { label: "Pantalla Escenario", color: "#8b5cf6" },
-  "PANTALLA PISTA": { label: "Pantalla Pista", color: "#7c3aed" },
-  "PANTALLA CABINA DJ": { label: "Pantalla Cabina DJ", color: "#6d28d9" },
+  "PANTALLA ESCENARIO": { label: "Pantalla Escenario", color: "#8b5cf6", kind2: "SCREEN" as const },
+  "PANTALLA PISTA": { label: "Pantalla Pista", color: "#7c3aed", kind2: "SCREEN" as const },
+  "PANTALLA CABINA DJ": { label: "Pantalla Cabina DJ", color: "#6d28d9", kind2: "SCREEN" as const },
 
   // AUDIO
-  ARRAY_L: { label: "Array L (5x Aero20A)", color: "#38bdf8" },
-  ARRAY_R: { label: "Array R (5x Aero20A)", color: "#38bdf8" },
-  SUB_U218: { label: "Sub DAS U-218", color: "#0ea5e9" },
-  ESCENARIO_L: { label: "Escenario L (Aero12A)", color: "#22c55e" },
-  ESCENARIO_R: { label: "Escenario R (Aero12A)", color: "#22c55e" },
-  MONITOR_DJ: { label: "Monitor DJ (Aero12A)", color: "#10b981" },
-  SUB_DJ_118A: { label: "Sub DJ (118A)", color: "#14b8a6" },
+  ARRAY_L: { label: "Array L (5x Aero20A)", color: "#38bdf8", kind2: "AUDIO" as const },
+  ARRAY_R: { label: "Array R (5x Aero20A)", color: "#38bdf8", kind2: "AUDIO" as const },
+  SUB_U218: { label: "Sub DAS U-218", color: "#0ea5e9", kind2: "AUDIO" as const },
+  ESCENARIO_L: { label: "Escenario L (Aero12A)", color: "#22c55e", kind2: "AUDIO" as const },
+  ESCENARIO_R: { label: "Escenario R (Aero12A)", color: "#22c55e", kind2: "AUDIO" as const },
+  MONITOR_DJ: { label: "Monitor DJ (Aero12A)", color: "#10b981", kind2: "AUDIO" as const },
+  SUB_DJ_118A: { label: "Sub DJ (118A)", color: "#14b8a6", kind2: "AUDIO" as const },
 } as const
-
 type NdType = keyof typeof ND_CATALOG
-
-type FixtureKind = "DMX" | "ND"
+type NdKind2 = (typeof ND_CATALOG)[NdType]["kind2"]
 
 type DmxFixture = {
   kind: "DMX"
   uid: string
-  id: string // puede repetirse del Excel
+  id: string
   x: number
   y: number
   type: DmxType
@@ -86,6 +100,10 @@ type DmxFixture = {
   universe: number
   address: number
   zona?: string
+  locked?: boolean
+
+  /** tamaño editable en px del plano */
+  sizePx?: number
 }
 
 type NdFixture = {
@@ -96,16 +114,25 @@ type NdFixture = {
   y: number
   type: NdType
   zona?: string
-
-  // props generales
   label?: string
+  quantity?: number
+
+  // pantallas (datos técnicos)
   widthM?: number
   heightM?: number
+
+  // pantallas (tamaño en plano)
   widthPx?: number
   heightPx?: number
+
+  // audio
+  sizePx?: number
+  rotation?: number
+
   modules?: number
   processor?: string
-  quantity?: number
+
+  locked?: boolean
 }
 
 type AnyFixture = DmxFixture | NdFixture
@@ -119,13 +146,13 @@ type PatchRow = {
   zona?: string
 }
 
+/** =========================
+ *  UTILS
+ *  ========================= */
+
 function isDmxType(t: string): t is DmxType {
   return (Object.keys(DMX_CATALOG) as string[]).includes(t)
 }
-
-/** =========================
- *  HELPERS
- *  ========================= */
 
 function dmxLabel(fx: Pick<DmxFixture, "universe" | "address">) {
   return `U${fx.universe}:${fx.address}`
@@ -151,7 +178,6 @@ function findModeIdByChannels(type: DmxType, channels: number) {
   return mode ? mode.id : entry.modes[0].id
 }
 
-// Buckets de zona para colocar por bloques
 function zoneBucket(zonaRaw?: string) {
   const z = (zonaRaw ?? "").toUpperCase()
   if (z.includes("ESCENARIO")) return "ESCENARIO"
@@ -160,6 +186,208 @@ function zoneBucket(zonaRaw?: string) {
   return "OTROS"
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n))
+}
+
+function normDeg(n: number) {
+  const x = ((n % 360) + 360) % 360
+  return x
+}
+
+function snapDeg(deg: number, step: number) {
+  return Math.round(deg / step) * step
+}
+
+/** =========================
+ *  HOOK: tamaño contenedor
+ *  ========================= */
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null)
+  const [size, setSize] = useState({ width: 1200, height: 720 })
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      const cr = entry.contentRect
+      setSize({
+        width: Math.max(320, Math.floor(cr.width)),
+        height: Math.max(320, Math.floor(cr.height)),
+      })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  return { ref, size }
+}
+
+/** =========================
+ *  SÍMBOLOS DMX (técnicos)
+ *  ========================= */
+
+function SunIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  const rays = 8
+  const rayInner = r * 0.85
+  const rayOuter = r * 1.35
+
+  return (
+    <Group>
+      <Circle x={0} y={0} radius={r * 0.55} fill={stroke} opacity={0.95} />
+      {Array.from({ length: rays }).map((_, i) => {
+        const a = (Math.PI * 2 * i) / rays
+        const x1 = Math.cos(a) * rayInner
+        const y1 = Math.sin(a) * rayInner
+        const x2 = Math.cos(a) * rayOuter
+        const y2 = Math.sin(a) * rayOuter
+        return <Line key={i} points={[x1, y1, x2, y2]} stroke={stroke} strokeWidth={strokeWidth} lineCap="round" />
+      })}
+    </Group>
+  )
+}
+
+function SpotFigureIcon({ stroke, strokeWidth }: { stroke: string; strokeWidth: number }) {
+  return (
+    <Group>
+      <Circle x={0} y={-7} radius={4} fill={stroke} opacity={0.95} />
+      <Line points={[0, -3, 0, 9]} stroke={stroke} strokeWidth={strokeWidth} lineCap="round" />
+      <Line points={[-6, 2, 6, 2]} stroke={stroke} strokeWidth={strokeWidth} lineCap="round" />
+      <Line points={[-5, 12, 0, 8, 5, 12]} stroke={stroke} strokeWidth={strokeWidth} lineCap="round" lineJoin="round" />
+    </Group>
+  )
+}
+
+function ParIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  return (
+    <Group>
+      <Circle x={0} y={0} radius={r * 0.62} stroke={stroke} strokeWidth={strokeWidth} />
+      <Circle x={0} y={0} radius={r * 0.34} stroke={stroke} strokeWidth={strokeWidth} opacity={0.9} />
+      <Line
+        points={[-r * 0.55, r * 0.75, 0, r * 0.35, r * 0.55, r * 0.75]}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        lineCap="round"
+        lineJoin="round"
+      />
+    </Group>
+  )
+}
+
+function LedIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  const s = r * 1.2
+  return (
+    <Group>
+      <Line points={[0, -s, s, 0, 0, s, -s, 0]} closed stroke={stroke} strokeWidth={strokeWidth} lineJoin="round" />
+      <Circle x={-r * 0.35} y={-r * 0.15} radius={r * 0.1} fill={stroke} opacity={0.9} />
+      <Circle x={r * 0.35} y={-r * 0.15} radius={r * 0.1} fill={stroke} opacity={0.9} />
+      <Circle x={-r * 0.35} y={r * 0.25} radius={r * 0.1} fill={stroke} opacity={0.9} />
+      <Circle x={r * 0.35} y={r * 0.25} radius={r * 0.1} fill={stroke} opacity={0.9} />
+    </Group>
+  )
+}
+
+function StrobeIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  return (
+    <Group>
+      <Rect x={-r * 0.9} y={-r * 0.45} width={r * 1.8} height={r * 0.9} cornerRadius={8} stroke={stroke} strokeWidth={strokeWidth} />
+      <Line points={[-r * 0.55, r * 0.35, -r * 0.1, -r * 0.1, r * 0.55, r * 0.35]} stroke={stroke} strokeWidth={strokeWidth} lineJoin="round" />
+      <Line points={[-r * 0.55, -r * 0.35, -r * 0.1, 0, r * 0.55, -r * 0.35]} stroke={stroke} strokeWidth={strokeWidth} lineJoin="round" opacity={0.6} />
+    </Group>
+  )
+}
+
+function LedBarIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  return (
+    <Group>
+      <Rect x={-r * 0.95} y={-r * 0.25} width={r * 1.9} height={r * 0.5} cornerRadius={6} stroke={stroke} strokeWidth={strokeWidth} />
+      {Array.from({ length: 6 }).map((_, i) => (
+        <Circle key={i} x={-r * 0.75 + i * (r * 0.3)} y={0} radius={r * 0.06} fill={stroke} opacity={0.9} />
+      ))}
+    </Group>
+  )
+}
+
+function BlinderIcon({ r, stroke, strokeWidth }: { r: number; stroke: string; strokeWidth: number }) {
+  return (
+    <Group>
+      <Rect x={-r * 0.7} y={-r * 0.7} width={r * 1.4} height={r * 1.4} cornerRadius={10} stroke={stroke} strokeWidth={strokeWidth} />
+      <Circle x={-r * 0.22} y={0} radius={r * 0.16} stroke={stroke} strokeWidth={strokeWidth} opacity={0.9} />
+      <Circle x={r * 0.22} y={0} radius={r * 0.16} stroke={stroke} strokeWidth={strokeWidth} opacity={0.9} />
+    </Group>
+  )
+}
+
+function DmxSymbol({ type, size, stroke }: { type: DmxType; size: number; stroke: string }) {
+  const r = size / 2
+  const sw = 2.2
+  switch (type) {
+    case "CABEZA MOVIL":
+      return <SunIcon r={r * 0.85} stroke={stroke} strokeWidth={sw} />
+    case "LED":
+      return <LedIcon r={r * 0.75} stroke={stroke} strokeWidth={sw} />
+    case "PAR":
+      return <ParIcon r={r * 0.75} stroke={stroke} strokeWidth={sw} />
+    case "LEDBAR":
+      return <LedBarIcon r={r * 0.75} stroke={stroke} strokeWidth={sw} />
+    case "STROBO":
+      return <StrobeIcon r={r * 0.75} stroke={stroke} strokeWidth={sw} />
+    case "CEGADORA":
+      return <BlinderIcon r={r * 0.75} stroke={stroke} strokeWidth={sw} />
+    case "PCDJ":
+      return <SpotFigureIcon stroke={stroke} strokeWidth={sw} />
+    default:
+      return <Rect x={-r} y={-r} width={size} height={size} cornerRadius={10} stroke={stroke} strokeWidth={sw} />
+  }
+}
+
+/** =========================
+ *  ZONAS (polígonos)
+ *  ========================= */
+
+type ZonePoly = {
+  id: string
+  name: string
+  color: string
+  points: number[] // [x1,y1,x2,y2...]
+  locked?: boolean
+}
+
+function genId(prefix = "id") {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyCrypto: any = typeof crypto !== "undefined" ? crypto : null
+  const id = anyCrypto?.randomUUID ? anyCrypto.randomUUID() : Math.random().toString(36).slice(2, 10)
+  return `${prefix}-${id}`
+}
+
+function centroid(points: number[]) {
+  let x = 0
+  let y = 0
+  const n = Math.max(1, Math.floor(points.length / 2))
+  for (let i = 0; i < points.length; i += 2) {
+    x += points[i]
+    y += points[i + 1]
+  }
+  return { x: x / n, y: y / n }
+}
+
+/** =========================
+ *  VIEW (zoom/pan)
+ *  ========================= */
+type View = {
+  scale: number
+  ox: number
+  oy: number
+}
+
+/** =========================
+ *  EDITOR
+ *  ========================= */
+
+type RiderStyle = "COLOR" | "CLASSIC"
+
 export default function EditorPage() {
   const [fixtures, setFixtures] = useState<AnyFixture[]>([])
   const [selectedUid, setSelectedUid] = useState<string | null>(null)
@@ -167,10 +395,120 @@ export default function EditorPage() {
   const [universeInput, setUniverseInput] = useState<string>("")
   const [addressInput, setAddressInput] = useState<string>("")
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [showSymbols, setShowSymbols] = useState<boolean>(true)
 
-  const stageSize = useMemo(() => ({ width: 900, height: 600 }), [])
+  // Fondo
+  const [bgUrl, setBgUrl] = useState<string | null>(DEFAULT_BG_URL)
+  const [bgOpacity, setBgOpacity] = useState<number>(1.0)
+  const [bgImg, setBgImg] = useState<HTMLImageElement | null>(null)
+
+  // Bloqueo global
+  const [lockDragging, setLockDragging] = useState<boolean>(false)
+
+  // Zonas
+  const [showZones, setShowZones] = useState<boolean>(true)
+  const [zonesOpacity, setZonesOpacity] = useState<number>(0.18)
+  const [zones, setZones] = useState<ZonePoly[]>([])
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null)
+  const [editZones, setEditZones] = useState<boolean>(true)
+
+  // Librería
+  const [libraryTab, setLibraryTab] = useState<"DMX" | "ND">("DMX")
+  const [libraryQuery, setLibraryQuery] = useState<string>("")
+
+  // Estilo
+  const [riderStyle, setRiderStyle] = useState<RiderStyle>("COLOR")
+
+  // Zoom/pan
+  const stageRef = useRef<Konva.Stage | null>(null)
+  const [view, setView] = useState<View>({ scale: 1, ox: 0, oy: 0 })
+  const [spaceDown, setSpaceDown] = useState(false)
+  const [isPanning, setIsPanning] = useState(false)
+  const panLast = useRef<{ x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    if (!bgUrl) {
+      setBgImg(null)
+      return
+    }
+    const img = new window.Image()
+    img.crossOrigin = "anonymous"
+    img.onload = () => setBgImg(img)
+    img.src = bgUrl
+  }, [bgUrl])
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const bgInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Contenedor responsive
+  const { ref: stageWrapRef, size: stageViewport } = useElementSize<HTMLDivElement>()
+
+  // Mundo = tamaño del plano
+  const worldSize = useMemo(() => {
+    const w = bgImg?.naturalWidth ?? 1800
+    const h = bgImg?.naturalHeight ?? 1200
+    return { width: w, height: h }
+  }, [bgImg])
+
+  // Fit inicial automático, luego deja zoom/pan libre
+  const fitView = useCallback(() => {
+    const vw = stageViewport.width
+    const vh = stageViewport.height
+    const ww = worldSize.width
+    const wh = worldSize.height
+    const scale = Math.min(vw / ww, vh / wh)
+    const ox = Math.floor((vw - ww * scale) / 2)
+    const oy = Math.floor((vh - wh * scale) / 2)
+    setView({ scale, ox, oy })
+  }, [stageViewport.width, stageViewport.height, worldSize.width, worldSize.height])
+
+  // Re-fit al cargar imagen o al cambiar tamaño del viewport, pero sólo si aún no se ha “tocado” mucho
+  const didInitFit = useRef(false)
+  useEffect(() => {
+    if (!didInitFit.current) {
+      fitView()
+      didInitFit.current = true
+      return
+    }
+    // si redimensionas ventana, re-centramos manteniendo el mismo zoom
+    setView((v) => {
+      const vw = stageViewport.width
+      const vh = stageViewport.height
+      // centrado suave: si el plano queda fuera, re-acomoda un poco
+      const minOx = vw - worldSize.width * v.scale
+      const minOy = vh - worldSize.height * v.scale
+      const ox = clamp(v.ox, minOx, 0)
+      const oy = clamp(v.oy, minOy, 0)
+      return { ...v, ox, oy }
+    })
+  }, [stageViewport.width, stageViewport.height, worldSize.width, worldSize.height, fitView])
+
+  // Teclas (Space para pan)
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => {
+      if (e.code === "Space") {
+        setSpaceDown(true)
+        // Evita scroll
+        e.preventDefault()
+      }
+    }
+    const onUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") {
+        setSpaceDown(false)
+        setIsPanning(false)
+        panLast.current = null
+      }
+    }
+    window.addEventListener("keydown", onDown, { passive: false } as any)
+    window.addEventListener("keyup", onUp)
+    return () => {
+      window.removeEventListener("keydown", onDown as any)
+      window.removeEventListener("keyup", onUp)
+    }
+  }, [])
+
   const selectedFixture = fixtures.find((f) => f.uid === selectedUid) ?? null
+  const selectedZone = zones.find((z) => z.id === selectedZoneId) ?? null
 
   function selectFixture(uid: string, listOverride?: AnyFixture[]) {
     const list = listOverride ?? fixtures
@@ -189,25 +527,21 @@ export default function EditorPage() {
     setFixtures((prev) => prev.map((fx) => (fx.uid === uid ? ({ ...fx, ...patch } as AnyFixture) : fx)))
   }
 
-  /** =========================
-   *  AÑADIR FIXTURES
-   *  ========================= */
-
   function addDmxFixture(type: DmxType) {
-    const uid = `uid-${crypto.randomUUID()}`
+    const uid = genId("uid")
     const id = `NEW_DMX_${fixtures.length + 1}`
     const defaultMode = DMX_CATALOG[type].modes[0].id
-
     const fx: DmxFixture = {
       kind: "DMX",
       uid,
       id,
-      x: 120,
-      y: 160,
+      x: Math.round(worldSize.width * 0.5),
+      y: Math.round(worldSize.height * 0.35),
       type,
       modeId: defaultMode,
       universe: 1,
       address: 1,
+      sizePx: DEFAULT_DMX_SIZE,
     }
     const next = [...fixtures, fx]
     setFixtures(next)
@@ -215,67 +549,41 @@ export default function EditorPage() {
   }
 
   function addNdFixture(type: NdType) {
-    const uid = `uid-${crypto.randomUUID()}`
+    const uid = genId("uid")
     const id = `${type}_${fixtures.length + 1}`
 
-    // Presets pantallas
     const preset =
       type === "PANTALLA ESCENARIO"
-        ? {
-            label: "Pantalla Escenario",
-            widthM: 6,
-            heightM: 2,
-            widthPx: 1536,
-            heightPx: 512,
-            modules: 48,
-            processor: "Novastar VX600",
-          }
+        ? { label: "Pantalla Escenario", widthM: 6, heightM: 2, widthPx: 520, heightPx: 180, modules: 48, processor: "Novastar VX600" }
         : type === "PANTALLA PISTA"
-          ? {
-              label: "Pantalla Pista",
-              widthM: 1,
-              heightM: 4,
-              widthPx: 256,
-              heightPx: 1024,
-              modules: 16,
-              processor: "Novastar VX600",
-            }
+          ? { label: "Pantalla Pista", widthM: 1, heightM: 4, widthPx: 160, heightPx: 420, modules: 16, processor: "Novastar VX600" }
           : type === "PANTALLA CABINA DJ"
-            ? {
-                label: "Pantalla Cabina DJ",
-                widthM: 3,
-                heightM: 1,
-                widthPx: 768,
-                heightPx: 256,
-                modules: 12,
-                processor: "Novastar VX600",
-              }
+            ? { label: "Pantalla Cabina DJ", widthM: 3, heightM: 1, widthPx: 320, heightPx: 120, modules: 12, processor: "Novastar VX600" }
             : {}
 
-    // Presets audio
     const audioPreset =
       type === "ARRAY_L"
-        ? { label: "Array L", quantity: 5 }
+        ? { label: "Array L", quantity: 5, rotation: 0, sizePx: DEFAULT_AUDIO_SIZE }
         : type === "ARRAY_R"
-          ? { label: "Array R", quantity: 5 }
+          ? { label: "Array R", quantity: 5, rotation: 180, sizePx: DEFAULT_AUDIO_SIZE }
           : type === "SUB_U218"
-            ? { label: "Sub U-218", quantity: 1 }
+            ? { label: "Sub U-218", quantity: 1, rotation: 0, sizePx: DEFAULT_AUDIO_SIZE }
             : type === "ESCENARIO_L"
-              ? { label: "Escenario L", quantity: 1 }
+              ? { label: "Escenario L", quantity: 1, rotation: 0, sizePx: DEFAULT_AUDIO_SIZE }
               : type === "ESCENARIO_R"
-                ? { label: "Escenario R", quantity: 1 }
+                ? { label: "Escenario R", quantity: 1, rotation: 180, sizePx: DEFAULT_AUDIO_SIZE }
                 : type === "MONITOR_DJ"
-                  ? { label: "Monitor DJ", quantity: 1 }
+                  ? { label: "Monitor DJ", quantity: 1, rotation: 0, sizePx: DEFAULT_AUDIO_SIZE }
                   : type === "SUB_DJ_118A"
-                    ? { label: "Sub DJ 118A", quantity: 1 }
+                    ? { label: "Sub DJ 118A", quantity: 1, rotation: 0, sizePx: DEFAULT_AUDIO_SIZE }
                     : {}
 
     const fx: NdFixture = {
       kind: "ND",
       uid,
       id,
-      x: 520,
-      y: 120,
+      x: Math.round(worldSize.width * 0.55),
+      y: Math.round(worldSize.height * 0.2),
       type,
       ...preset,
       ...audioPreset,
@@ -287,7 +595,7 @@ export default function EditorPage() {
   }
 
   /** =========================
-   *  IMPORT EXCEL (SOLO DMX)
+   *  IMPORT EXCEL DMX
    *  ========================= */
 
   function triggerImport() {
@@ -312,20 +620,26 @@ export default function EditorPage() {
       }))
       .filter((r) => r.id && r.tipo && Number.isFinite(r.canales) && r.canales > 0 && r.universe > 0 && r.address > 0)
 
-    // Agrupar por zona bucket
     const buckets: Record<string, PatchRow[]> = { ESCENARIO: [], PISTA: [], VIP: [], OTROS: [] }
     for (const r of parsed) buckets[zoneBucket(r.zona)].push(r)
     for (const k of Object.keys(buckets)) {
       buckets[k].sort((a, b) => (a.universe - b.universe) || (a.address - b.address) || a.id.localeCompare(b.id))
     }
 
-    // Layout por bloques
+    // Colocación inicial
     const order = ["ESCENARIO", "PISTA", "VIP", "OTROS"] as const
-    const blockY: Record<(typeof order)[number], number> = { ESCENARIO: 40, PISTA: 240, VIP: 420, OTROS: 520 }
-    const startX = 40
-    const cols = 14
-    const stepX = 60
-    const stepY = 70
+    const margin = 80
+    const cols = 18
+    const stepX = 46
+    const stepY = 46
+
+    const bandH = Math.max(240, Math.floor((worldSize.height - margin * 2) / 4))
+    const bandY: Record<(typeof order)[number], number> = {
+      ESCENARIO: margin,
+      PISTA: margin + bandH * 1,
+      VIP: margin + bandH * 2,
+      OTROS: margin + bandH * 3,
+    }
 
     const nextDmx: DmxFixture[] = []
     let globalIndex = 0
@@ -334,26 +648,27 @@ export default function EditorPage() {
       const list = buckets[bucket]
       for (let i = 0; i < list.length; i++) {
         const r = list[i]
-        const safeType: DmxType = isDmxType(r.tipo) ? r.tipo : "LED"
+        const tipoUpper = r.tipo.toUpperCase()
+        const safeType: DmxType = isDmxType(tipoUpper) ? (tipoUpper as DmxType) : "LED"
         const modeId = findModeIdByChannels(safeType, r.canales)
 
         nextDmx.push({
           kind: "DMX",
           uid: `${r.id}__${globalIndex}`,
           id: r.id,
-          x: startX + (i % cols) * stepX,
-          y: blockY[bucket] + Math.floor(i / cols) * stepY,
+          x: clamp(margin + (i % cols) * stepX, 0, worldSize.width - 1),
+          y: clamp(bandY[bucket] + Math.floor(i / cols) * stepY, 0, worldSize.height - 1),
           type: safeType,
           modeId,
           universe: r.universe,
           address: r.address,
           zona: r.zona || undefined,
+          sizePx: DEFAULT_DMX_SIZE,
         })
         globalIndex++
       }
     }
 
-    // Import reemplaza solo DMX, pero respeta los ND que ya tengas
     const existingNd = fixtures.filter((f) => f.kind === "ND") as NdFixture[]
     const nextAll: AnyFixture[] = [...nextDmx, ...existingNd]
     setFixtures(nextAll)
@@ -399,10 +714,8 @@ export default function EditorPage() {
           const b = ranges[j]
           const overlap = a.start <= b.end && b.start <= a.end
           if (!overlap) continue
-
           const identical = a.start === b.start && a.end === b.end && a.ch === b.ch
           if (identical) continue
-
           out.push({ kind: "OVERLAP", fixtureUid: a.fx.uid, withUid: b.fx.uid, universe: u })
           out.push({ kind: "OVERLAP", fixtureUid: b.fx.uid, withUid: a.fx.uid, universe: u })
         }
@@ -427,7 +740,7 @@ export default function EditorPage() {
   const selectedIssues = selectedFixture ? issueByFixture.get(selectedFixture.uid) ?? [] : []
 
   /** =========================
-   *  AUTO-PATCH (SOLO DMX)
+   *  AUTO PATCH (DMX)
    *  ========================= */
 
   function autoPatch(targetUids?: Set<string>) {
@@ -491,11 +804,10 @@ export default function EditorPage() {
 
     const byUid = new Map(patched.map((f) => [f.uid, f]))
     const finalDmx = dmx.map((f) => byUid.get(f.uid) ?? f)
-    const finalAll: AnyFixture[] = [...finalDmx, ...nd]
-    setFixtures(finalAll)
+    setFixtures([...finalDmx, ...nd])
 
     if (selectedUid) {
-      const fx = finalAll.find((f) => f.uid === selectedUid)
+      const fx = [...finalDmx, ...nd].find((f) => f.uid === selectedUid)
       if (fx && fx.kind === "DMX") {
         setUniverseInput(String(fx.universe))
         setAddressInput(String(fx.address))
@@ -513,71 +825,224 @@ export default function EditorPage() {
   }
 
   /** =========================
-   *  UI
+   *  FONDO
+   *  ========================= */
+
+  function triggerBgImport() {
+    bgInputRef.current?.click()
+  }
+
+  async function onImportBg(file: File) {
+    const url = URL.createObjectURL(file)
+    setBgUrl(url)
+    didInitFit.current = false
+    // re-fit con nueva imagen
+    setTimeout(() => {
+      fitView()
+      didInitFit.current = true
+    }, 0)
+  }
+
+  /** =========================
+   *  ND Helpers
+   *  ========================= */
+
+  function ndKind2(type: NdType): NdKind2 {
+    return ND_CATALOG[type].kind2
+  }
+
+  function screenSizePx(fx: NdFixture) {
+    const w = Math.max(20, Math.round(fx.widthPx ?? 220))
+    const h = Math.max(20, Math.round(fx.heightPx ?? 120))
+    return { w, h }
+  }
+
+  function audioTrianglePoints(size: number) {
+    const half = size / 2
+    return [-half, -half, -half, half, half, 0]
+  }
+
+  /** =========================
+   *  Librería
+   *  ========================= */
+
+  const dmxTypes = useMemo(() => Object.keys(DMX_CATALOG) as DmxType[], [])
+  const ndTypes = useMemo(() => Object.keys(ND_CATALOG) as NdType[], [])
+
+  const filteredDmx = useMemo(() => {
+    const q = libraryQuery.trim().toLowerCase()
+    if (!q) return dmxTypes
+    return dmxTypes.filter((t) => t.toLowerCase().includes(q) || DMX_CATALOG[t].label.toLowerCase().includes(q))
+  }, [dmxTypes, libraryQuery])
+
+  const filteredNd = useMemo(() => {
+    const q = libraryQuery.trim().toLowerCase()
+    if (!q) return ndTypes
+    return ndTypes.filter((t) => t.toLowerCase().includes(q) || ND_CATALOG[t].label.toLowerCase().includes(q))
+  }, [ndTypes, libraryQuery])
+
+  /** =========================
+   *  Estilo
+   *  ========================= */
+  const COLORS = useMemo(() => {
+    const classic = riderStyle === "CLASSIC"
+    return {
+      classic,
+      mono: "#e5e7eb",
+      strokeBase: "#0b1220",
+      selected: "#f59e0b",
+      issue: "#ff2d2d",
+      label: "#e5e7eb",
+      subLabel: classic ? "#a3a3a3" : "#9ca3af",
+      fine: classic ? "#737373" : "#6b7280",
+      ndFillClassic: "rgba(0,0,0,0)",
+      ndStrokeClassic: "#e5e7eb",
+    }
+  }, [riderStyle])
+
+  function baseFillFor(fx: AnyFixture) {
+    if (COLORS.classic) return COLORS.mono
+    return fx.kind === "DMX" ? DMX_CATALOG[fx.type].color : ND_CATALOG[fx.type].color
+  }
+
+  /** =========================
+   *  ZONAS: acciones
+   *  ========================= */
+  function addZone() {
+    const id = genId("zone")
+    const base = Math.min(worldSize.width, worldSize.height) * 0.12
+    const cx = worldSize.width * 0.5
+    const cy = worldSize.height * 0.5
+    const z: ZonePoly = {
+      id,
+      name: `ZONA ${zones.length + 1}`,
+      color: "#ffd400",
+      points: [cx - base, cy - base, cx + base, cy - base, cx + base, cy + base, cx - base, cy + base],
+    }
+    const next = [...zones, z]
+    setZones(next)
+    setSelectedZoneId(id)
+    setSelectedUid(null)
+  }
+
+  function updateZone(id: string, patch: Partial<ZonePoly>) {
+    setZones((prev) => prev.map((z) => (z.id === id ? { ...z, ...patch } : z)))
+  }
+
+  function moveZone(id: string, dx: number, dy: number) {
+    setZones((prev) =>
+      prev.map((z) => {
+        if (z.id !== id) return z
+        const pts = [...z.points]
+        for (let i = 0; i < pts.length; i += 2) {
+          pts[i] += dx
+          pts[i + 1] += dy
+        }
+        return { ...z, points: pts }
+      })
+    )
+  }
+
+  function deleteZone(id: string) {
+    setZones((prev) => prev.filter((z) => z.id !== id))
+    if (selectedZoneId === id) setSelectedZoneId(null)
+  }
+
+  function addZonePoint(id: string) {
+    setZones((prev) =>
+      prev.map((z) => {
+        if (z.id !== id) return z
+        const c = centroid(z.points)
+        return { ...z, points: [...z.points, c.x + 30, c.y + 30] }
+      })
+    )
+  }
+
+  function removeZonePoint(id: string) {
+    setZones((prev) =>
+      prev.map((z) => {
+        if (z.id !== id) return z
+        if (z.points.length <= 6) return z // mínimo triángulo
+        return { ...z, points: z.points.slice(0, -2) }
+      })
+    )
+  }
+
+  /** =========================
+   *  EXPORT
+   *  ========================= */
+  function exportJson() {
+    const data = { fixtures, zones, bgUrl }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = "magma-map.json"
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  /** =========================
+   *  VIEW: helpers zoom/pan
+   *  ========================= */
+
+  // conversión pantalla->mundo con view actual
+  const screenToWorld = useCallback(
+    (sx: number, sy: number) => {
+      const wx = (sx - view.ox) / view.scale
+      const wy = (sy - view.oy) / view.scale
+      return { x: wx, y: wy }
+    },
+    [view.ox, view.oy, view.scale]
+  )
+
+  const zoomAt = useCallback(
+    (sx: number, sy: number, factor: number) => {
+      setView((v) => {
+        const newScale = clamp(v.scale * factor, 0.1, 8)
+        // punto mundo bajo el cursor
+        const wx = (sx - v.ox) / v.scale
+        const wy = (sy - v.oy) / v.scale
+        // nuevo offset para que el mismo punto quede bajo el cursor
+        const ox = sx - wx * newScale
+        const oy = sy - wy * newScale
+        return { scale: newScale, ox, oy }
+      })
+    },
+    []
+  )
+
+  const zoomIn = useCallback(() => {
+    const sx = stageViewport.width / 2
+    const sy = stageViewport.height / 2
+    zoomAt(sx, sy, 1.15)
+  }, [stageViewport.width, stageViewport.height, zoomAt])
+
+  const zoomOut = useCallback(() => {
+    const sx = stageViewport.width / 2
+    const sy = stageViewport.height / 2
+    zoomAt(sx, sy, 1 / 1.15)
+  }, [stageViewport.width, stageViewport.height, zoomAt])
+
+  const resetView = useCallback(() => {
+    fitView()
+  }, [fitView])
+
+  /** =========================
+   *  RENDER
    *  ========================= */
 
   return (
     <main className="flex min-h-screen bg-neutral-950 text-white">
       <div className="flex-1 p-6">
-        <div className="mb-4 flex flex-wrap gap-2">
+        {/* TOP BAR */}
+        <div className="mb-4 flex flex-wrap gap-2 items-center">
           <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={triggerImport}>
             Importar Patch DMX (Excel)
           </button>
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xls"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) onImportFile(f)
-              e.currentTarget.value = ""
-            }}
-          />
-
-          {/* DMX buttons */}
-          {(Object.keys(DMX_CATALOG) as DmxType[]).map((t) => (
-            <button
-              key={t}
-              className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700"
-              onClick={() => addDmxFixture(t)}
-            >
-              + {t}
-            </button>
-          ))}
-
-          {/* ND buttons */}
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("PANTALLA ESCENARIO")}>
-            + Pantalla Escenario
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("PANTALLA PISTA")}>
-            + Pantalla Pista
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("PANTALLA CABINA DJ")}>
-            + Pantalla Cabina DJ
-          </button>
-
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("ARRAY_L")}>
-            + Array L
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("ARRAY_R")}>
-            + Array R
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("SUB_U218")}>
-            + Sub U-218
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("ESCENARIO_L")}>
-            + Escenario L
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("ESCENARIO_R")}>
-            + Escenario R
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("MONITOR_DJ")}>
-            + Monitor DJ
-          </button>
-          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addNdFixture("SUB_DJ_118A")}>
-            + Sub DJ 118A
+          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={triggerBgImport}>
+            Cambiar plano (subir imagen)
           </button>
 
           <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={autoPatchAll}>
@@ -592,361 +1057,847 @@ export default function EditorPage() {
             Auto-patch seleccionado
           </button>
 
+          {/* Zoom controls */}
+          <div className="ml-2 flex items-center gap-2 rounded border border-neutral-800 bg-neutral-900/30 px-2 py-1">
+            <div className="text-sm text-neutral-300 font-semibold">Vista</div>
+            <button className="rounded bg-neutral-800 px-3 py-1 text-sm hover:bg-neutral-700" onClick={zoomOut}>
+              Alejar
+            </button>
+            <button className="rounded bg-neutral-800 px-3 py-1 text-sm hover:bg-neutral-700" onClick={zoomIn}>
+              Acercar
+            </button>
+            <button className="rounded bg-neutral-800 px-3 py-1 text-sm hover:bg-neutral-700" onClick={resetView}>
+              Reset vista
+            </button>
+            <div className="text-xs text-neutral-400 ml-2">
+              Zoom: {(view.scale * 100).toFixed(0)}% • Pan: Space + arrastrar • Rueda: zoom
+            </div>
+          </div>
+
+          <label className="ml-2 flex items-center gap-2 text-sm text-neutral-300 select-none">
+            <input type="checkbox" checked={showSymbols} onChange={(e) => setShowSymbols(e.target.checked)} />
+            Ver símbolos
+          </label>
+
+          <label className="ml-2 flex items-center gap-2 text-sm text-neutral-300 select-none">
+            <input type="checkbox" checked={showZones} onChange={(e) => setShowZones(e.target.checked)} />
+            Ver zonas
+          </label>
+
+          <label className="ml-2 flex items-center gap-2 text-sm text-neutral-300 select-none">
+            <input type="checkbox" checked={editZones} onChange={(e) => setEditZones(e.target.checked)} />
+            Editar zonas
+          </label>
+
+          <label className="ml-2 flex items-center gap-2 text-sm text-neutral-300 select-none">
+            <input type="checkbox" checked={lockDragging} onChange={(e) => setLockDragging(e.target.checked)} />
+            Bloquear arrastre (global)
+          </label>
+
+          {/* Rider presets */}
+          <div className="ml-2 flex items-center gap-2 rounded border border-neutral-800 bg-neutral-900/30 px-2 py-1">
+            <div className="text-sm text-neutral-300 font-semibold">Estilo</div>
+            <button
+              className={`rounded px-3 py-1 text-sm ${riderStyle === "COLOR" ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700"}`}
+              onClick={() => setRiderStyle("COLOR")}
+            >
+              Rider color
+            </button>
+            <button
+              className={`rounded px-3 py-1 text-sm ${riderStyle === "CLASSIC" ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700"}`}
+              onClick={() => setRiderStyle("CLASSIC")}
+            >
+              Rider clásico
+            </button>
+          </div>
+
           <div className="ml-auto flex items-center gap-3">
             <div className="text-sm text-neutral-300">
               Issues (DMX):{" "}
-              <span className={issueCount > 0 ? "text-red-400 font-semibold" : "text-green-400 font-semibold"}>
-                {issueCount}
-              </span>
+              <span className={issueCount > 0 ? "text-red-400 font-semibold" : "text-green-400 font-semibold"}>{issueCount}</span>
             </div>
 
-            <button
-              className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700"
-              onClick={() => {
-                const data = { fixtures }
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
-                const url = URL.createObjectURL(blob)
-                const a = document.createElement("a")
-                a.href = url
-                a.download = "magma-map.json"
-                a.click()
-                URL.revokeObjectURL(url)
-              }}
-            >
+            <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={exportJson}>
               Exportar JSON
             </button>
           </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) onImportFile(f)
+              e.currentTarget.value = ""
+            }}
+          />
+
+          <input
+            ref={bgInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) onImportBg(f)
+              e.currentTarget.value = ""
+            }}
+          />
         </div>
 
-        <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
+        {/* PLANO CONTROLS */}
+        <div className="mb-3 rounded border border-neutral-800 bg-neutral-900/30 p-3 flex flex-wrap gap-4 items-center">
+          <div className="text-sm text-neutral-300 font-semibold">Plano</div>
+          <div className="flex items-center gap-2 text-sm text-neutral-300">
+            Opacidad
+            <input type="range" min={0} max={1} step={0.01} value={bgOpacity} onChange={(e) => setBgOpacity(Number(e.target.value))} />
+            <span className="tabular-nums text-neutral-400">{bgOpacity.toFixed(2)}</span>
+          </div>
+
+          <div className="ml-6 text-sm text-neutral-400">
+            Área válida:{" "}
+            <span className="font-semibold text-neutral-200">
+              {worldSize.width}×{worldSize.height}px
+            </span>{" "}
+            (imagen completa)
+          </div>
+
+          {showZones ? (
+            <div className="ml-6 flex items-center gap-2 text-sm text-neutral-300">
+              Zonas (opacidad)
+              <input type="range" min={0} max={0.35} step={0.01} value={zonesOpacity} onChange={(e) => setZonesOpacity(Number(e.target.value))} />
+              <span className="tabular-nums text-neutral-400">{zonesOpacity.toFixed(2)}</span>
+            </div>
+          ) : null}
+
+          <button className="ml-auto rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => setBgUrl(DEFAULT_BG_URL)}>
+            Reset plano predeterminado
+          </button>
+        </div>
+
+        {/* CANVAS */}
+        <div ref={stageWrapRef} className="rounded border border-neutral-800 bg-neutral-900/30 p-2 h-[78vh] w-full overflow-hidden">
           <Stage
-            width={stageSize.width}
-            height={stageSize.height}
+            ref={(n) => {
+              stageRef.current = n
+            }}
+            width={stageViewport.width}
+            height={stageViewport.height}
+            onWheel={(e) => {
+              e.evt.preventDefault()
+              const stage = e.target.getStage()
+              if (!stage) return
+              const pointer = stage.getPointerPosition()
+              if (!pointer) return
+              const deltaY = e.evt.deltaY
+              const factor = deltaY > 0 ? 1 / 1.08 : 1.08
+              zoomAt(pointer.x, pointer.y, factor)
+            }}
             onMouseDown={(e) => {
-              if (e.target === e.target.getStage()) {
+              const stage = e.target.getStage()
+              if (!stage) return
+
+              // PAN: Space + drag (o botón medio)
+              if (spaceDown || (e.evt as MouseEvent).button === 1) {
+                setIsPanning(true)
+                panLast.current = stage.getPointerPosition() ?? null
+                return
+              }
+
+              // Deselección si clic en vacío
+              if (e.target === stage) {
                 setSelectedUid(null)
+                setSelectedZoneId(null)
                 setUniverseInput("")
                 setAddressInput("")
               }
             }}
+            onMouseMove={(e) => {
+              if (!isPanning) return
+              const stage = e.target.getStage()
+              if (!stage) return
+              const pos = stage.getPointerPosition()
+              if (!pos) return
+              const last = panLast.current
+              if (!last) {
+                panLast.current = pos
+                return
+              }
+              const dx = pos.x - last.x
+              const dy = pos.y - last.y
+              panLast.current = pos
+              setView((v) => ({ ...v, ox: v.ox + dx, oy: v.oy + dy }))
+            }}
+            onMouseUp={() => {
+              setIsPanning(false)
+              panLast.current = null
+            }}
           >
             <Layer>
-              {fixtures.map((fx) => {
-                const isSelected = selectedUid === fx.uid
-                const isIssue = fx.kind === "DMX" ? hasIssue(fx.uid) : false
+              {/* TODO EL MUNDO (view transform manual) */}
+              <Group x={view.ox} y={view.oy} scaleX={view.scale} scaleY={view.scale}>
+                {/* Fondo */}
+                {bgImg ? <KonvaImage image={bgImg} x={0} y={0} opacity={bgOpacity} listening={false} /> : null}
 
-                const fill =
-                  isIssue ? "#ff2d2d" : isSelected ? "#f59e0b" : fx.kind === "DMX" ? DMX_CATALOG[fx.type].color : ND_CATALOG[fx.type].color
+                {/* Zonas */}
+                {showZones
+                  ? zones.map((z) => {
+                      const isSelected = selectedZoneId === z.id
+                      const locked = !!z.locked
+                      const strokeW = isSelected ? 3 : 2
+                      const c = centroid(z.points)
 
-                const label =
-                  fx.kind === "DMX"
-                    ? `${fx.type} ${dmxLabel(fx)}`
-                    : `${fx.type.replaceAll("_", " ")}${fx.label ? ` • ${fx.label}` : ""}`
+                      return (
+                        <Group key={z.id}>
+                          <Line
+                            points={z.points}
+                            closed
+                            fill={z.color}
+                            opacity={zonesOpacity}
+                            stroke={z.color}
+                            strokeWidth={strokeW}
+                            draggable={editZones && !locked && !lockDragging}
+                            onClick={(ev) => {
+                              ev.cancelBubble = true
+                              setSelectedZoneId(z.id)
+                              setSelectedUid(null)
+                            }}
+                            onDragEnd={(ev) => {
+                              const dx = ev.target.x()
+                              const dy = ev.target.y()
+                              ev.target.position({ x: 0, y: 0 })
+                              moveZone(z.id, dx, dy)
+                            }}
+                          />
 
-                return (
-                  <Group key={fx.uid}>
-                    <Rect
+                          <Text text={z.name} x={c.x + 8} y={c.y - 18} fontSize={14} fill={z.color} opacity={0.95} />
+
+                          {/* Handles */}
+                          {editZones && isSelected
+                            ? z.points.map((_, idx) => {
+                                if (idx % 2 !== 0) return null
+                                const px = z.points[idx]
+                                const py = z.points[idx + 1]
+                                return (
+                                  <Circle
+                                    key={`${z.id}-h-${idx}`}
+                                    x={px}
+                                    y={py}
+                                    radius={7}
+                                    fill="#111827"
+                                    stroke={z.color}
+                                    strokeWidth={2}
+                                    draggable={!locked && !lockDragging}
+                                    onMouseDown={(ev) => (ev.cancelBubble = true)}
+                                    onDragMove={(ev) => {
+                                      const nx = ev.target.x()
+                                      const ny = ev.target.y()
+                                      setZones((prev) =>
+                                        prev.map((zz) => {
+                                          if (zz.id !== z.id) return zz
+                                          const pts = [...zz.points]
+                                          pts[idx] = nx
+                                          pts[idx + 1] = ny
+                                          return { ...zz, points: pts }
+                                        })
+                                      )
+                                    }}
+                                  />
+                                )
+                              })
+                            : null}
+                        </Group>
+                      )
+                    })
+                  : null}
+
+                {/* FIXTURES */}
+                {fixtures.map((fx) => {
+                  const isSelected = selectedUid === fx.uid
+                  const isIssue = fx.kind === "DMX" ? hasIssue(fx.uid) : false
+
+                  const base = baseFillFor(fx)
+                  const fill = isIssue ? COLORS.issue : isSelected ? COLORS.selected : base
+                  const stroke = isSelected ? COLORS.selected : COLORS.strokeBase
+                  const strokeWidth = isSelected ? 3 : 2
+
+                  const fxLocked = !!fx.locked || lockDragging
+
+                  // ND
+                  if (fx.kind === "ND") {
+                    const k2 = ND_CATALOG[fx.type].kind2
+                    const baseLabel = ND_CATALOG[fx.type].label
+
+                    // SCREEN
+                    if (k2 === "SCREEN") {
+                      const { w, h } = screenSizePx(fx)
+                      const screenFill = COLORS.classic ? COLORS.ndFillClassic : "rgba(0,0,0,0)"
+                      const screenStroke = COLORS.classic ? COLORS.ndStrokeClassic : stroke
+
+                      return (
+                        <Group key={fx.uid}>
+                          <Rect
+                            x={fx.x}
+                            y={fx.y}
+                            width={w}
+                            height={h}
+                            cornerRadius={10}
+                            fill={screenFill}
+                            stroke={screenStroke}
+                            strokeWidth={strokeWidth}
+                            draggable={!fxLocked}
+                            onClick={(ev) => {
+                              ev.cancelBubble = true
+                              selectFixture(fx.uid)
+                              setSelectedZoneId(null)
+                            }}
+                            onDragEnd={(e) => updateFixture(fx.uid, { x: e.target.x(), y: e.target.y() })}
+                          />
+                          <Text
+                            text={`${fx.label ?? baseLabel}${fx.widthM && fx.heightM ? ` (${fx.widthM}x${fx.heightM}m)` : ""}`}
+                            x={fx.x}
+                            y={fx.y - 18}
+                            fontSize={12}
+                            fill={COLORS.label}
+                          />
+                        </Group>
+                      )
+                    }
+
+                    // AUDIO
+                    const size = Math.max(16, Math.round(fx.sizePx ?? DEFAULT_AUDIO_SIZE))
+                    const rot = fx.rotation ?? 0
+                    const cx = fx.x + size / 2
+                    const cy = fx.y + size / 2
+                    const handleOffset = size * 1.35
+                    const handleR = 7
+
+                    const audioFill = COLORS.classic ? COLORS.ndFillClassic : "rgba(0,0,0,0)"
+                    const audioStroke = COLORS.classic ? COLORS.ndStrokeClassic : "#e5e7eb"
+
+                    return (
+                      <Group
+                        key={fx.uid}
+                        x={cx}
+                        y={cy}
+                        rotation={rot}
+                        draggable={!fxLocked}
+                        onClick={(ev) => {
+                          ev.cancelBubble = true
+                          selectFixture(fx.uid)
+                          setSelectedZoneId(null)
+                        }}
+                        onDblClick={() => updateFixture(fx.uid, { rotation: 0 } as Partial<NdFixture>)}
+                        onDragEnd={(e) => {
+                          if (e.target !== e.currentTarget) return
+                          const node = e.currentTarget
+                          updateFixture(fx.uid, { x: node.x() - size / 2, y: node.y() - size / 2 })
+                        }}
+                      >
+                        <Line points={audioTrianglePoints(size)} closed fill={audioFill} stroke={audioStroke} strokeWidth={strokeWidth} />
+                        <Line points={[-size / 2 - 10, 0, -size / 2, 0]} stroke={audioStroke} strokeWidth={2} />
+
+                        {isSelected && !fxLocked ? (
+                          <>
+                            <Line points={[0, 0, 0, -handleOffset]} stroke={audioStroke} strokeWidth={2} />
+                            <Group
+                              x={0}
+                              y={-handleOffset}
+                              draggable
+                              dragOnTop={false}
+                              onMouseDown={(ev) => {
+                                ev.cancelBubble = true
+                              }}
+                              onDragMove={(ev) => {
+                                ev.cancelBubble = true
+                                const hx = ev.target.x()
+                                const hy = ev.target.y()
+                                let deg = (Math.atan2(hy, hx) * 180) / Math.PI
+                                deg = normDeg(deg)
+                                const evt = ev.evt as MouseEvent
+                                if (evt.shiftKey) deg = normDeg(snapDeg(deg, 15))
+                                updateFixture(fx.uid, { rotation: deg } as Partial<NdFixture>)
+                              }}
+                              onDragEnd={(ev) => {
+                                ev.cancelBubble = true
+                                ev.target.position({ x: 0, y: -handleOffset })
+                              }}
+                            >
+                              <Rect x={-handleR} y={-handleR} width={handleR * 2} height={handleR * 2} cornerRadius={handleR} fill="#111827" stroke={audioStroke} strokeWidth={2} />
+                            </Group>
+                          </>
+                        ) : null}
+
+                        <Group rotation={-rot}>
+                          <Text text={fx.label ?? baseLabel} x={-80} y={-46} fontSize={12} fill={COLORS.label} />
+                          {typeof fx.quantity === "number" ? (
+                            <Text text={`x${fx.quantity}`} x={-80} y={-30} fontSize={11} fill={COLORS.subLabel} />
+                          ) : null}
+                        </Group>
+                      </Group>
+                    )
+                  }
+
+                  // DMX
+                  const size = Math.max(14, Math.round(fx.sizePx ?? DEFAULT_DMX_SIZE))
+                  const label = `${fx.type} ${dmxLabel(fx)}`
+                  const symSize = Math.max(12, Math.round(size * 0.9))
+
+                  return (
+                    <Group
+                      key={fx.uid}
                       x={fx.x}
                       y={fx.y}
-                      width={54}
-                      height={54}
-                      cornerRadius={8}
-                      fill={fill}
-                      stroke={isIssue ? "#ffffff" : "#0b1220"}
-                      strokeWidth={isIssue ? 3 : 2}
-                      draggable
-                      onClick={() => selectFixture(fx.uid)}
-                      onDragEnd={(e) => updateFixture(fx.uid, { x: e.target.x(), y: e.target.y() })}
-                    />
-                    <Text text={label} x={fx.x} y={fx.y - 18} fontSize={12} fill="#e5e7eb" />
-
-                    {fx.zona ? <Text text={fx.zona} x={fx.x} y={fx.y + 58} fontSize={10} fill="#9ca3af" /> : null}
-
-                    {fx.kind === "DMX" ? (
-                      <Text
-                        text={`(${rangeLabel(fx.address, getChannels(fx))})`}
-                        x={fx.x}
-                        y={fx.y + 72}
-                        fontSize={10}
-                        fill="#6b7280"
+                      draggable={!fxLocked}
+                      onClick={(ev) => {
+                        ev.cancelBubble = true
+                        selectFixture(fx.uid)
+                        setSelectedZoneId(null)
+                      }}
+                      onDragEnd={(e) => {
+                        if (e.target !== e.currentTarget) return
+                        const node = e.currentTarget
+                        updateFixture(fx.uid, { x: node.x(), y: node.y() })
+                      }}
+                    >
+                      <Rect
+                        x={0}
+                        y={0}
+                        width={size}
+                        height={size}
+                        cornerRadius={Math.max(6, Math.round(size * 0.18))}
+                        fill={"rgba(0,0,0,0)"}
+                        stroke={isIssue ? "#ffffff" : stroke}
+                        strokeWidth={isIssue ? 3 : strokeWidth}
                       />
-                    ) : null}
-                  </Group>
-                )
-              })}
+
+                      {showSymbols ? (
+                        <Group x={size / 2} y={size / 2} listening={false}>
+                          <DmxSymbol type={fx.type} size={symSize} stroke={fill} />
+                        </Group>
+                      ) : null}
+
+                      <Text text={label} x={0} y={-18} fontSize={12} fill={COLORS.label} />
+                      {fx.zona ? <Text text={fx.zona} x={0} y={size + 4} fontSize={10} fill={COLORS.subLabel} /> : null}
+                      <Text text={`(${rangeLabel(fx.address, getChannels(fx))})`} x={0} y={size + 18} fontSize={10} fill={COLORS.fine} />
+                    </Group>
+                  )
+                })}
+              </Group>
             </Layer>
           </Stage>
         </div>
       </div>
 
-      <aside className="w-[460px] border-l border-neutral-800 p-6">
-        <h2 className="mb-4 text-lg font-semibold">Propiedades</h2>
+      {/* SIDEBAR */}
+      <aside className="w-[460px] border-l border-neutral-800 p-6 space-y-6 overflow-y-auto max-h-screen">
+        {/* LIBRERÍA */}
+        <section className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-semibold">Librería</div>
+            <div className="flex gap-2">
+              <button
+                className={`rounded px-3 py-1 text-sm ${libraryTab === "DMX" ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700"}`}
+                onClick={() => setLibraryTab("DMX")}
+              >
+                DMX
+              </button>
+              <button
+                className={`rounded px-3 py-1 text-sm ${libraryTab === "ND" ? "bg-neutral-700" : "bg-neutral-800 hover:bg-neutral-700"}`}
+                onClick={() => setLibraryTab("ND")}
+              >
+                NO-DMX
+              </button>
+            </div>
+          </div>
 
-        {!selectedFixture && <p className="text-neutral-400">Selecciona un objeto</p>}
+          <input
+            className="mt-3 w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+            placeholder="Buscar (ej: cabeza, par, strobe...)"
+            value={libraryQuery}
+            onChange={(e) => setLibraryQuery(e.target.value)}
+          />
 
-        {selectedFixture && selectedFixture.kind === "DMX" && (
-          <div className="space-y-4">
-            <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
-              <div className="text-sm text-neutral-300">Seleccionado (DMX)</div>
-              <div className="mt-1 font-semibold">
-                {selectedFixture.id} — {DMX_CATALOG[selectedFixture.type].label}
-              </div>
-              <div className="mt-1 text-sm text-neutral-300">
-                DMX:{" "}
-                <span className={selectedIssues.length > 0 ? "text-red-400 font-semibold" : "text-green-400 font-semibold"}>
-                  {dmxLabel(selectedFixture)}
-                </span>
-              </div>
-              <div className="mt-1 text-sm text-neutral-300">
-                Modo: <span className="font-semibold">{getMode(selectedFixture).label}</span> • Canales:{" "}
-                <span className="font-semibold">{getChannels(selectedFixture)}</span> • Rango:{" "}
-                <span className="font-semibold">{rangeLabel(selectedFixture.address, getChannels(selectedFixture))}</span>
-              </div>
-
-              {selectedFixture.zona ? (
-                <div className="mt-1 text-sm text-neutral-300">
-                  Zona: <span className="font-semibold">{selectedFixture.zona}</span>
-                </div>
-              ) : null}
-
-              {selectedIssues.length > 0 && (
-                <div className="mt-2 space-y-1 text-sm text-red-300">
-                  {selectedIssues.slice(0, 6).map((it, idx) => {
-                    if (it.kind === "OUT_OF_RANGE") {
-                      return (
-                        <div key={idx}>
-                          Fuera de rango: U{it.universe} ocupa {it.start}-{it.end} (máx 512)
-                        </div>
-                      )
-                    }
-                    return (
-                      <div key={idx}>
-                        Solapamiento parcial en U{it.universe} con otro fixture
+          {libraryTab === "DMX" ? (
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {filteredDmx.map((t) => {
+                const previewStroke = riderStyle === "CLASSIC" ? "#e5e7eb" : DMX_CATALOG[t].color
+                return (
+                  <button key={t} className="rounded bg-neutral-800 hover:bg-neutral-700 p-2 text-left" onClick={() => addDmxFixture(t)} title="Añadir">
+                    <div className="flex items-center gap-2">
+                      <div className="h-10 w-10 rounded bg-neutral-950 border border-neutral-700 flex items-center justify-center">
+                        <Stage width={40} height={40}>
+                          <Layer listening={false}>
+                            <Group x={20} y={20}>
+                              <DmxSymbol type={t} size={28} stroke={previewStroke} />
+                            </Group>
+                          </Layer>
+                        </Stage>
                       </div>
-                    )
-                  })}
-                </div>
-              )}
+                      <div>
+                        <div className="text-sm font-semibold">{t}</div>
+                        <div className="text-xs text-neutral-400">{DMX_CATALOG[t].label}</div>
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
-
-            <div>
-              <label className="mb-1 block text-sm">Tipo</label>
-              <select
-                value={selectedFixture.type}
-                onChange={(e) => {
-                  const type = e.target.value as DmxType
-                  const defaultMode = DMX_CATALOG[type].modes[0].id
-                  updateFixture(selectedFixture.uid, { type, modeId: defaultMode } as Partial<DmxFixture>)
-                }}
-                className="w-full rounded bg-neutral-800 px-2 py-2"
-              >
-                {(Object.keys(DMX_CATALOG) as DmxType[]).map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+          ) : (
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {filteredNd.map((t) => (
+                <button key={t} className="rounded bg-neutral-800 hover:bg-neutral-700 p-2 text-left" onClick={() => addNdFixture(t)} title="Añadir">
+                  <div className="text-sm font-semibold">{t}</div>
+                  <div className="text-xs text-neutral-400">{ND_CATALOG[t].label}</div>
+                </button>
+              ))}
             </div>
+          )}
 
-            <div>
-              <label className="mb-1 block text-sm">Modo</label>
-              <select
-                value={selectedFixture.modeId}
-                onChange={(e) => updateFixture(selectedFixture.uid, { modeId: e.target.value } as Partial<DmxFixture>)}
-                className="w-full rounded bg-neutral-800 px-2 py-2"
-              >
-                {DMX_CATALOG[selectedFixture.type].modes.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label} ({m.channels}ch)
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="mt-3 text-xs text-neutral-400">Rider clásico: monocromo técnico. Rider color: operativo y visual.</div>
+        </section>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-sm">Universe</label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={universeInput}
-                  onChange={(e) => /^\d*$/.test(e.target.value) && setUniverseInput(e.target.value)}
-                  onBlur={() => {
-                    const n = Number(universeInput)
-                    const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
-                    setUniverseInput(String(safe))
-                    updateFixture(selectedFixture.uid, { universe: safe } as Partial<DmxFixture>)
-                  }}
-                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm">Address</label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={addressInput}
-                  onChange={(e) => /^\d*$/.test(e.target.value) && setAddressInput(e.target.value)}
-                  onBlur={() => {
-                    const n = Number(addressInput)
-                    const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
-                    setAddressInput(String(safe))
-                    updateFixture(selectedFixture.uid, { address: safe } as Partial<DmxFixture>)
-                  }}
-                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-sm">Zona</label>
-              <input
-                type="text"
-                value={selectedFixture.zona ?? ""}
-                onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<DmxFixture>)}
-                className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-              />
-            </div>
-
-            <button
-              className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
-              onClick={() => {
-                setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
-                setSelectedUid(null)
-                setUniverseInput("")
-                setAddressInput("")
-              }}
-            >
-              Borrar este objeto
+        {/* ZONAS */}
+        <section className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Zonas (polígonos)</div>
+            <button className="rounded bg-neutral-800 px-3 py-1 text-sm hover:bg-neutral-700" onClick={addZone}>
+              + Añadir
             </button>
           </div>
-        )}
 
-        {selectedFixture && selectedFixture.kind === "ND" && (
-          <div className="space-y-4">
-            <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
-              <div className="text-sm text-neutral-300">Seleccionado (NO-DMX)</div>
-              <div className="mt-1 font-semibold">{ND_CATALOG[selectedFixture.type].label}</div>
-            </div>
+          {zones.length === 0 ? <div className="text-sm text-neutral-400">No hay zonas. Crea una con “Añadir”.</div> : null}
 
-            <div>
-              <label className="mb-1 block text-sm">Etiqueta / Nombre</label>
-              <input
-                type="text"
-                value={selectedFixture.label ?? ""}
-                onChange={(e) => updateFixture(selectedFixture.uid, { label: e.target.value } as Partial<NdFixture>)}
-                className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-              />
-            </div>
-
-            <div>
-              <label className="mb-1 block text-sm">Zona</label>
-              <input
-                type="text"
-                value={selectedFixture.zona ?? ""}
-                onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<NdFixture>)}
-                className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-              />
-            </div>
-
-            {/* Pantallas: tamaño/px/módulos/procesador */}
-            {selectedFixture.type.includes("PANTALLA") ? (
-              <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
-                <div className="font-semibold">Datos de pantalla</div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="mb-1 block text-sm">Ancho (m)</label>
-                    <input
-                      type="number"
-                      value={selectedFixture.widthM ?? 0}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { widthM: Number(e.target.value) } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
+          <div className="space-y-2">
+            {zones.map((z) => {
+              const active = selectedZoneId === z.id
+              return (
+                <button
+                  key={z.id}
+                  className={`w-full rounded border px-3 py-2 text-left ${active ? "border-neutral-500 bg-neutral-800" : "border-neutral-800 bg-neutral-900/20 hover:bg-neutral-800"}`}
+                  onClick={() => {
+                    setSelectedZoneId(z.id)
+                    setSelectedUid(null)
+                  }}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold">{z.name}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-3 w-3 rounded" style={{ background: z.color }} />
+                      <span className="text-xs text-neutral-400">{Math.floor(z.points.length / 2)} pts</span>
+                    </div>
                   </div>
-                  <div>
-                    <label className="mb-1 block text-sm">Alto (m)</label>
-                    <input
-                      type="number"
-                      value={selectedFixture.heightM ?? 0}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { heightM: Number(e.target.value) } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
-                  </div>
+                </button>
+              )
+            })}
+          </div>
+
+          {selectedZone ? (
+            <div className="rounded border border-neutral-800 bg-neutral-950/30 p-3 space-y-3">
+              <div className="text-sm text-neutral-300">Zona seleccionada</div>
+
+              <div>
+                <label className="mb-1 block text-sm">Nombre</label>
+                <input
+                  className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                  value={selectedZone.name}
+                  onChange={(e) => updateZone(selectedZone.id, { name: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Color</label>
+                <input
+                  type="color"
+                  value={selectedZone.color}
+                  onChange={(e) => updateZone(selectedZone.id, { color: e.target.value })}
+                  className="h-10 w-full rounded bg-neutral-800 p-1"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-sm text-neutral-300 select-none">
+                <input type="checkbox" checked={!!selectedZone.locked} onChange={(e) => updateZone(selectedZone.id, { locked: e.target.checked })} />
+                Bloquear zona
+              </label>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => addZonePoint(selectedZone.id)} disabled={!!selectedZone.locked}>
+                  + Punto
+                </button>
+                <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={() => removeZonePoint(selectedZone.id)} disabled={!!selectedZone.locked}>
+                  - Punto
+                </button>
+              </div>
+
+              <button className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500" onClick={() => deleteZone(selectedZone.id)}>
+                Borrar zona
+              </button>
+
+              <div className="text-xs text-neutral-400">
+                Edita puntos en el plano. Pan con Space. Si activas “Bloquear arrastre (global)”, no podrás mover zonas/fixtures.
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-neutral-400">Selecciona una zona para editarla.</div>
+          )}
+        </section>
+
+        {/* PROPIEDADES */}
+        <section>
+          <h2 className="mb-3 text-lg font-semibold">Propiedades</h2>
+
+          {!selectedFixture && <p className="text-neutral-400">Selecciona un objeto</p>}
+
+          {selectedFixture && (
+            <div className="mb-4 rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-2">
+              <div className="text-sm text-neutral-300">Movimiento</div>
+              <label className="flex items-center gap-2 text-sm text-neutral-300 select-none">
+                <input type="checkbox" checked={!!selectedFixture.locked} onChange={(e) => updateFixture(selectedFixture.uid, { locked: e.target.checked } as any)} />
+                Bloquear este fixture
+              </label>
+              <div className="text-xs text-neutral-400">Tip: activa “Bloquear arrastre (global)” cuando estés colocando posiciones reales.</div>
+            </div>
+          )}
+
+          {/* DMX PROPS */}
+          {selectedFixture && selectedFixture.kind === "DMX" && (
+            <div className="space-y-4">
+              <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
+                <div className="text-sm text-neutral-300">Seleccionado (DMX)</div>
+                <div className="mt-1 font-semibold">
+                  {selectedFixture.id} — {DMX_CATALOG[selectedFixture.type].label}
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="mb-1 block text-sm">Ancho (px)</label>
-                    <input
-                      type="number"
-                      value={selectedFixture.widthPx ?? 0}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { widthPx: Number(e.target.value) } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-sm">Alto (px)</label>
-                    <input
-                      type="number"
-                      value={selectedFixture.heightPx ?? 0}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { heightPx: Number(e.target.value) } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
-                  </div>
+                <div className="mt-1 text-sm text-neutral-300">
+                  DMX:{" "}
+                  <span className={selectedIssues.length > 0 ? "text-red-400 font-semibold" : "text-green-400 font-semibold"}>{dmxLabel(selectedFixture)}</span>
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="mb-1 block text-sm">Módulos</label>
-                    <input
-                      type="number"
-                      value={selectedFixture.modules ?? 0}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { modules: Number(e.target.value) } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-sm">Procesador</label>
-                    <input
-                      type="text"
-                      value={selectedFixture.processor ?? ""}
-                      onChange={(e) => updateFixture(selectedFixture.uid, { processor: e.target.value } as Partial<NdFixture>)}
-                      className="w-full rounded bg-neutral-800 px-2 py-2"
-                    />
-                  </div>
+                <div className="mt-1 text-sm text-neutral-300">
+                  Modo: <span className="font-semibold">{getMode(selectedFixture).label}</span> • Canales:{" "}
+                  <span className="font-semibold">{getChannels(selectedFixture)}</span> • Rango:{" "}
+                  <span className="font-semibold">{rangeLabel(selectedFixture.address, getChannels(selectedFixture))}</span>
                 </div>
               </div>
-            ) : null}
 
-            {/* Audio: cantidad */}
-            {!selectedFixture.type.includes("PANTALLA") ? (
               <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
-                <div className="font-semibold">Datos de audio</div>
+                <div className="font-semibold">Visual</div>
                 <div>
-                  <label className="mb-1 block text-sm">Cantidad</label>
+                  <label className="mb-1 block text-sm">Tamaño (px en plano)</label>
                   <input
                     type="number"
-                    value={selectedFixture.quantity ?? 1}
-                    onChange={(e) => updateFixture(selectedFixture.uid, { quantity: Number(e.target.value) } as Partial<NdFixture>)}
+                    value={selectedFixture.sizePx ?? DEFAULT_DMX_SIZE}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: Number(e.target.value) } as Partial<DmxFixture>)}
                     className="w-full rounded bg-neutral-800 px-2 py-2"
                   />
                 </div>
               </div>
-            ) : null}
 
-            <button
-              className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
-              onClick={() => {
-                setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
-                setSelectedUid(null)
-              }}
-            >
-              Borrar este objeto
-            </button>
-          </div>
-        )}
+              <div>
+                <label className="mb-1 block text-sm">Tipo</label>
+                <select
+                  value={selectedFixture.type}
+                  onChange={(e) => {
+                    const type = e.target.value as DmxType
+                    const defaultMode = DMX_CATALOG[type].modes[0].id
+                    updateFixture(selectedFixture.uid, { type, modeId: defaultMode } as Partial<DmxFixture>)
+                  }}
+                  className="w-full rounded bg-neutral-800 px-2 py-2"
+                >
+                  {(Object.keys(DMX_CATALOG) as DmxType[]).map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Modo</label>
+                <select value={selectedFixture.modeId} onChange={(e) => updateFixture(selectedFixture.uid, { modeId: e.target.value } as Partial<DmxFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2">
+                  {DMX_CATALOG[selectedFixture.type].modes.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label} ({m.channels}ch)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-sm">Universe</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={universeInput}
+                    onChange={(e) => /^\d*$/.test(e.target.value) && setUniverseInput(e.target.value)}
+                    onBlur={() => {
+                      const n = Number(universeInput)
+                      const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
+                      setUniverseInput(String(safe))
+                      updateFixture(selectedFixture.uid, { universe: safe } as Partial<DmxFixture>)
+                    }}
+                    className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm">Address</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={addressInput}
+                    onChange={(e) => /^\d*$/.test(e.target.value) && setAddressInput(e.target.value)}
+                    onBlur={() => {
+                      const n = Number(addressInput)
+                      const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
+                      setAddressInput(String(safe))
+                      updateFixture(selectedFixture.uid, { address: safe } as Partial<DmxFixture>)
+                    }}
+                    className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Zona (texto libre)</label>
+                <input type="text" value={selectedFixture.zona ?? ""} onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<DmxFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500" />
+              </div>
+
+              <button
+                className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
+                onClick={() => {
+                  setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
+                  setSelectedUid(null)
+                  setUniverseInput("")
+                  setAddressInput("")
+                }}
+              >
+                Borrar este objeto
+              </button>
+            </div>
+          )}
+
+          {/* ND PROPS */}
+          {selectedFixture && selectedFixture.kind === "ND" && (
+            <div className="space-y-4">
+              <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
+                <div className="text-sm text-neutral-300">Seleccionado (NO-DMX)</div>
+                <div className="mt-1 font-semibold">{ND_CATALOG[selectedFixture.type].label}</div>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Etiqueta / Nombre</label>
+                <input
+                  type="text"
+                  value={selectedFixture.label ?? ""}
+                  onChange={(e) => updateFixture(selectedFixture.uid, { label: e.target.value } as Partial<NdFixture>)}
+                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-sm">Zona (texto libre)</label>
+                <input
+                  type="text"
+                  value={selectedFixture.zona ?? ""}
+                  onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<NdFixture>)}
+                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                />
+              </div>
+
+              {ndKind2(selectedFixture.type) === "SCREEN" ? (
+                <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
+                  <div className="font-semibold">Pantalla</div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm">Ancho (m)</label>
+                      <input type="number" value={selectedFixture.widthM ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { widthM: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm">Alto (m)</label>
+                      <input type="number" value={selectedFixture.heightM ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { heightM: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm">Ancho en plano (px)</label>
+                      <input type="number" value={selectedFixture.widthPx ?? 220} onChange={(e) => updateFixture(selectedFixture.uid, { widthPx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm">Alto en plano (px)</label>
+                      <input type="number" value={selectedFixture.heightPx ?? 120} onChange={(e) => updateFixture(selectedFixture.uid, { heightPx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm">Módulos</label>
+                      <input type="number" value={selectedFixture.modules ?? 0} onChange={(e) => updateFixture(selectedFixture.uid, { modules: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm">Procesador</label>
+                      <input type="text" value={selectedFixture.processor ?? ""} onChange={(e) => updateFixture(selectedFixture.uid, { processor: e.target.value } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-neutral-400">widthM/heightM se guardan para rider/PDF. El tamaño visual lo controlas con widthPx/heightPx.</div>
+                </div>
+              ) : null}
+
+              {ndKind2(selectedFixture.type) === "AUDIO" ? (
+                <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
+                  <div className="font-semibold">Audio (orientación)</div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm">Cantidad</label>
+                      <input type="number" value={selectedFixture.quantity ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { quantity: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm">Tamaño (px)</label>
+                      <input type="number" value={selectedFixture.sizePx ?? DEFAULT_AUDIO_SIZE} onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 items-center">
+                    <div>
+                      <label className="mb-1 block text-sm">Rotación (°)</label>
+                      <input
+                        type="number"
+                        value={selectedFixture.rotation ?? 0}
+                        onChange={(e) => {
+                          const n = Number(e.target.value)
+                          const safe = Number.isFinite(n) ? clamp(Math.round(n), 0, 360) : 0
+                          updateFixture(selectedFixture.uid, { rotation: safe } as Partial<NdFixture>)
+                        }}
+                        className="w-full rounded bg-neutral-800 px-2 py-2"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm">Slider</label>
+                      <input type="range" min={0} max={360} value={selectedFixture.rotation ?? 0} onChange={(e) => updateFixture(selectedFixture.uid, { rotation: Number(e.target.value) } as Partial<NdFixture>)} className="w-full" />
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-neutral-400">SHIFT = snap 15°. Doble click = reset 0°.</div>
+                </div>
+              ) : null}
+
+              <button
+                className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
+                onClick={() => {
+                  setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
+                  setSelectedUid(null)
+                }}
+              >
+                Borrar este objeto
+              </button>
+            </div>
+          )}
+        </section>
       </aside>
     </main>
   )
