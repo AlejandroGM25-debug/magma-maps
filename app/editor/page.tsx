@@ -419,6 +419,9 @@ export default function EditorPage() {
   // Estilo
   const [riderStyle, setRiderStyle] = useState<RiderStyle>("COLOR")
 
+  // Mensajes/estado (import/export)
+  const [statusMsg, setStatusMsg] = useState<string | null>(null)
+
   // Zoom/pan
   const stageRef = useRef<Konva.Stage | null>(null)
   const [view, setView] = useState<View>({ scale: 1, ox: 0, oy: 0 })
@@ -439,37 +442,149 @@ export default function EditorPage() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const bgInputRef = useRef<HTMLInputElement | null>(null)
+  const projectJsonInputRef = useRef<HTMLInputElement | null>(null)
+
+  // ✅ AUTOSAVE
+  const AUTOSAVE_KEY = "magma-map-autosave-v2"
+  const autosaveLoadedRef = useRef(false)
+  const autosaveTimerRef = useRef<number | null>(null)
+
+useEffect(() => {
+  if (autosaveLoadedRef.current) return
+
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY)
+    if (!raw) {
+      autosaveLoadedRef.current = true
+      return
+    }
+
+    const parsed = JSON.parse(raw)
+
+    // soporta root directo o root anidado en data
+    const root =
+      parsed?.fixtures || parsed?.zones || parsed?.bgUrl || parsed?.view
+        ? parsed
+        : parsed?.data ?? {}
+
+    const rawFixtures = Array.isArray(root?.fixtures) ? root.fixtures : []
+    const rawZones = Array.isArray(root?.zones) ? root.zones : []
+
+    const nextFixtures = coerceImportedFixtures(rawFixtures)
+    const nextZones = coerceImportedZones(rawZones)
+
+    // bgUrl: si es blob no sirve tras refresh
+    let nextBgUrl = bgUrl
+    if (typeof root?.bgUrl === "string" && root.bgUrl && !root.bgUrl.startsWith("blob:")) {
+      nextBgUrl = root.bgUrl
+    }
+
+    // aplica estado
+    setFixtures(nextFixtures)
+    setZones(nextZones)
+    setBgUrl(nextBgUrl)
+
+    // vista: si viene, úsala y evita que el init-fit la pise
+    if (isValidView(root?.view)) {
+      setView(root.view)
+      didInitFit.current = true
+    }
+
+    setSelectedUid(nextFixtures[0]?.uid ?? null)
+    setSelectedZoneId(nextZones[0]?.id ?? null)
+
+    setUniverseInput("")
+    setAddressInput("")
+
+    setStatusMsg(
+      `Autosave restaurado: ${nextFixtures.length} fixtures, ${nextZones.length} zonas.`
+    )
+  } catch (e) {
+    console.warn("Autosave inválido, se ignora:", e)
+  } finally {
+    autosaveLoadedRef.current = true
+  }
+// solo al montar
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [])
+
+useEffect(() => {
+  // evita escribir antes de intentar restaurar al montar
+  if (!autosaveLoadedRef.current) return
+
+  // debounce: no guardamos en cada pixel de drag
+  if (autosaveTimerRef.current) {
+    window.clearTimeout(autosaveTimerRef.current)
+  }
+
+  autosaveTimerRef.current = window.setTimeout(() => {
+    try {
+      const data = {
+        schemaVersion: 2,
+        savedAt: new Date().toISOString(),
+        bgUrl: typeof bgUrl === "string" && bgUrl && !bgUrl.startsWith("blob:") ? bgUrl : null,
+        fixtures,
+        zones,
+        view,
+      }
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data))
+      // opcional: no spamear statusMsg, lo dejamos silencioso
+      // setStatusMsg("Autosave guardado.")
+    } catch (e) {
+      console.warn("No se pudo guardar autosave:", e)
+    }
+  }, 250)
+
+  return () => {
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+  }
+}, [AUTOSAVE_KEY, bgUrl, fixtures, zones, view])
 
   // Contenedor responsive
   const { ref: stageWrapRef, size: stageViewport } = useElementSize<HTMLDivElement>()
 
   // Mundo = tamaño del plano
   const worldSize = useMemo(() => {
-    const w = bgImg?.naturalWidth ?? 1800
-    const h = bgImg?.naturalHeight ?? 1200
-    return { width: w, height: h }
-  }, [bgImg])
+  const w = bgImg?.naturalWidth ?? 0
+  const h = bgImg?.naturalHeight ?? 0
+  return { width: w, height: h }
+}, [bgImg])
 
   // Fit inicial automático, luego deja zoom/pan libre
   const fitView = useCallback(() => {
-    const vw = stageViewport.width
-    const vh = stageViewport.height
-    const ww = worldSize.width
-    const wh = worldSize.height
-    const scale = Math.min(vw / ww, vh / wh)
-    const ox = Math.floor((vw - ww * scale) / 2)
-    const oy = Math.floor((vh - wh * scale) / 2)
-    setView({ scale, ox, oy })
-  }, [stageViewport.width, stageViewport.height, worldSize.width, worldSize.height])
+  const vw = stageViewport.width
+  const vh = stageViewport.height
+  const ww = worldSize.width
+  const wh = worldSize.height
+
+  if (!vw || !vh || !ww || !wh) return
+
+  // ✅ siempre centrado al 25% (igual que tu "Reset vista")
+  const v = computeCenteredView(vw, vh, ww, wh, 0.25)
+  setView(v)
+}, [stageViewport.width, stageViewport.height, worldSize.width, worldSize.height])
 
   // Re-fit al cargar imagen o al cambiar tamaño del viewport, pero sólo si aún no se ha “tocado” mucho
   const didInitFit = useRef(false)
   useEffect(() => {
-    if (!didInitFit.current) {
-      fitView()
-      didInitFit.current = true
-      return
-    }
+  const vw = stageViewport.width
+  const vh = stageViewport.height
+  const ww = worldSize.width
+  const wh = worldSize.height
+
+  // 🔴 Esperar a que haya tamaños reales
+  if (!vw || !vh || !ww || !wh) return
+  // opcional pero recomendado:
+  if (!bgImg || !bgImg.naturalWidth || !bgImg.naturalHeight) return
+  // 🟢 Solo una vez: centrar al iniciar
+  if (!didInitFit.current) {
+    fitView()
+    didInitFit.current = true
+    return
+  }
     // si redimensionas ventana, re-centramos manteniendo el mismo zoom
     setView((v) => {
       const vw = stageViewport.width
@@ -481,7 +596,14 @@ export default function EditorPage() {
       const oy = clamp(v.oy, minOy, 0)
       return { ...v, ox, oy }
     })
-  }, [stageViewport.width, stageViewport.height, worldSize.width, worldSize.height, fitView])
+  }, [
+  stageViewport.width,
+  stageViewport.height,
+  worldSize.width,
+  worldSize.height,
+  fitView,
+  bgImg   
+])
 
   // Teclas (Space para pan)
   useEffect(() => {
@@ -972,15 +1094,245 @@ export default function EditorPage() {
    *  EXPORT
    *  ========================= */
   function exportJson() {
-    const data = { fixtures, zones, bgUrl }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = "magma-map.json"
-    a.click()
-    URL.revokeObjectURL(url)
+  const data = {
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    bgUrl,
+    fixtures,
+    zones,
+    view,
   }
+
+  console.log("EXPORT JSON:", data)
+  console.log("EXPORT KEYS:", Object.keys(data))
+  console.log("EXPORT zones length:", zones.length)
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  })
+
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = "magma-map.json"
+  a.click()
+  URL.revokeObjectURL(url)
+
+  setStatusMsg(
+    `Exportado: ${fixtures.length} fixtures, ${zones.length} zonas.`
+  )
+}
+
+  /** =========================
+   *  IMPORT PROYECTO (JSON)
+   *  ========================= */
+
+  function triggerProjectImport() {
+    projectJsonInputRef.current?.click()
+  }
+
+  function coerceImportedFixtures(raw: any): AnyFixture[] {
+    if (!Array.isArray(raw)) return []
+
+    const out: AnyFixture[] = []
+    for (const it of raw) {
+      if (!it || typeof it !== "object") continue
+      const kind = it.kind
+
+      if (kind === "DMX") {
+        const typeRaw = String(it.type ?? "").toUpperCase()
+        const safeType: DmxType = isDmxType(typeRaw) ? (typeRaw as DmxType) : "LED"
+
+        const modeIdRaw = String(it.modeId ?? DMX_CATALOG[safeType].modes[0].id)
+        const hasMode = DMX_CATALOG[safeType].modes.some((m) => m.id === modeIdRaw)
+        const safeModeId = hasMode ? modeIdRaw : DMX_CATALOG[safeType].modes[0].id
+
+        const fx: DmxFixture = {
+          kind: "DMX",
+          uid: String(it.uid ?? genId("uid")),
+          id: String(it.id ?? "DMX"),
+          x: Number(it.x ?? 0),
+          y: Number(it.y ?? 0),
+          type: safeType,
+          modeId: safeModeId,
+          universe: Number(it.universe ?? 1),
+          address: Number(it.address ?? 1),
+          zona: it.zona ? String(it.zona) : undefined,
+          locked: !!it.locked,
+          sizePx: typeof it.sizePx === "number" ? it.sizePx : DEFAULT_DMX_SIZE,
+        }
+
+        // clamp básico al mundo actual (si hay plano cargado)
+        fx.x = clamp(fx.x, 0, worldSize.width - 1)
+        fx.y = clamp(fx.y, 0, worldSize.height - 1)
+        fx.universe = clamp(Math.round(fx.universe), 1, 99)
+        fx.address = clamp(Math.round(fx.address), 1, 512)
+
+        out.push(fx)
+        continue
+      }
+
+      if (kind === "ND") {
+        const typeRaw = String(it.type ?? "")
+        const safeType = (Object.keys(ND_CATALOG) as NdType[]).includes(typeRaw as NdType) ? (typeRaw as NdType) : null
+        if (!safeType) continue
+
+        const fx: NdFixture = {
+          kind: "ND",
+          uid: String(it.uid ?? genId("uid")),
+          id: String(it.id ?? safeType),
+          x: Number(it.x ?? 0),
+          y: Number(it.y ?? 0),
+          type: safeType,
+          zona: it.zona ? String(it.zona) : undefined,
+          label: it.label ? String(it.label) : undefined,
+          quantity: typeof it.quantity === "number" ? it.quantity : undefined,
+
+          widthM: typeof it.widthM === "number" ? it.widthM : undefined,
+          heightM: typeof it.heightM === "number" ? it.heightM : undefined,
+          widthPx: typeof it.widthPx === "number" ? it.widthPx : undefined,
+          heightPx: typeof it.heightPx === "number" ? it.heightPx : undefined,
+
+          sizePx: typeof it.sizePx === "number" ? it.sizePx : DEFAULT_AUDIO_SIZE,
+          rotation: typeof it.rotation === "number" ? it.rotation : undefined,
+
+          modules: typeof it.modules === "number" ? it.modules : undefined,
+          processor: it.processor ? String(it.processor) : undefined,
+
+          locked: !!it.locked,
+        }
+
+        fx.x = clamp(fx.x, 0, worldSize.width - 1)
+        fx.y = clamp(fx.y, 0, worldSize.height - 1)
+
+        out.push(fx)
+        continue
+      }
+    }
+
+    return out
+  }
+
+  function coerceImportedZones(input: any): ZonePoly[] {
+  if (!Array.isArray(input)) return []
+
+  const out: ZonePoly[] = []
+
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue
+
+    // points: debe ser array de números, mínimo 6 (triángulo = 3 puntos = 6 nums)
+    const ptsRaw = (raw as any).points
+    if (!Array.isArray(ptsRaw) || ptsRaw.length < 6) continue
+
+    const pts: number[] = []
+    for (const v of ptsRaw) {
+      const n = typeof v === "number" ? v : Number(v)
+      if (!Number.isFinite(n)) {
+        // si hay un punto inválido, descartamos la zona entera
+        pts.length = 0
+        break
+      }
+      pts.push(n)
+    }
+    if (pts.length < 6) continue
+
+    const idRaw = (raw as any).id
+    const nameRaw = (raw as any).name
+    const colorRaw = (raw as any).color
+    const lockedRaw = (raw as any).locked
+
+    const z: ZonePoly = {
+      id: typeof idRaw === "string" && idRaw.trim() ? idRaw : genId("zone"),
+      name: typeof nameRaw === "string" && nameRaw.trim() ? nameRaw : "ZONA",
+      color: typeof colorRaw === "string" && colorRaw.trim() ? colorRaw : "#ffd400",
+      points: pts,
+      // si tu tipo ZonePoly no tiene locked, quita esta línea
+      locked: !!lockedRaw,
+    }
+
+    out.push(z)
+  }
+
+  return out
+}
+
+  async function onImportProjectJson(file: File) {
+  try {
+    const txt = await file.text()
+    const parsed = JSON.parse(txt)
+
+  if (!parsed || typeof parsed !== "object") {
+  setStatusMsg("JSON inválido.")
+  return
+}
+
+const hasZones =
+  Array.isArray((parsed as any).zones) || Array.isArray((parsed as any)?.data?.zones)
+
+const hasFixtures =
+  Array.isArray((parsed as any).fixtures) || Array.isArray((parsed as any)?.data?.fixtures)
+
+if (!hasZones && !hasFixtures) {
+  setStatusMsg("Este archivo no parece un export del editor (faltan fixtures/zones).")
+  return
+}
+
+    console.log("PARSED JSON:", parsed)
+    console.log("PARSED KEYS:", Object.keys(parsed))
+
+    // 🔹 Soporta export directo o export anidado
+    const root =
+      parsed?.fixtures || parsed?.zones
+        ? parsed
+        : parsed?.data ?? {}
+
+    const rawFixtures = Array.isArray(root?.fixtures) ? root.fixtures : []
+    const rawZones = Array.isArray(root?.zones) ? root.zones : []
+
+    const nextFixtures = coerceImportedFixtures(rawFixtures)
+    const nextZones = coerceImportedZones(rawZones)
+
+    // 🔍 DEBUG IMPORT
+    console.log("IMPORT rawZones:", rawZones)
+    console.log("IMPORT nextZones:", nextZones)
+
+    // 🔹 bgUrl robusto (evita blob:)
+    let nextBgUrl = DEFAULT_BG_URL
+    if (typeof root?.bgUrl === "string" && !root.bgUrl.startsWith("blob:")) {
+      nextBgUrl = root.bgUrl
+    }
+
+    setFixtures(nextFixtures)
+    setZones(nextZones)
+    setBgUrl(nextBgUrl)
+
+// ✅ Restaurar vista si viene en el JSON
+    if (isValidView(root?.view)) {
+    setView(root.view)
+    didInitFit.current = true
+    } else {
+  // si no hay vista guardada, usamos la vista por defecto (25% centrado)
+  fitView()
+  didInitFit.current = true
+    }
+
+    setSelectedUid(nextFixtures[0]?.uid ?? null)
+    setSelectedZoneId(nextZones[0]?.id ?? null)
+
+    setUniverseInput("")
+    setAddressInput("")
+
+    setStatusMsg(
+      `Proyecto importado: ${nextFixtures.length} fixtures, ${nextZones.length} zonas.`
+    )
+  } catch (err) {
+    console.error("Import error:", err)
+    setStatusMsg(
+      "Error al importar JSON. Comprueba que el archivo es un export válido del editor."
+    )
+  }
+}
 
   /** =========================
    *  VIEW: helpers zoom/pan
@@ -996,21 +1348,18 @@ export default function EditorPage() {
     [view.ox, view.oy, view.scale]
   )
 
-  const zoomAt = useCallback(
-    (sx: number, sy: number, factor: number) => {
-      setView((v) => {
-        const newScale = clamp(v.scale * factor, 0.1, 8)
-        // punto mundo bajo el cursor
-        const wx = (sx - v.ox) / v.scale
-        const wy = (sy - v.oy) / v.scale
-        // nuevo offset para que el mismo punto quede bajo el cursor
-        const ox = sx - wx * newScale
-        const oy = sy - wy * newScale
-        return { scale: newScale, ox, oy }
-      })
-    },
-    []
-  )
+  const zoomAt = useCallback((sx: number, sy: number, factor: number) => {
+    setView((v) => {
+      const newScale = clamp(v.scale * factor, 0.1, 8)
+      // punto mundo bajo el cursor
+      const wx = (sx - v.ox) / v.scale
+      const wy = (sy - v.oy) / v.scale
+      // nuevo offset para que el mismo punto quede bajo el cursor
+      const ox = sx - wx * newScale
+      const oy = sy - wy * newScale
+      return { scale: newScale, ox, oy }
+    })
+  }, [])
 
   const zoomIn = useCallback(() => {
     const sx = stageViewport.width / 2
@@ -1028,6 +1377,32 @@ export default function EditorPage() {
     fitView()
   }, [fitView])
 
+type ViewState = { scale: number; ox: number; oy: number }
+
+function computeCenteredView(
+  stageW: number,
+  stageH: number,
+  worldW: number,
+  worldH: number,
+  scale = 0.25
+): ViewState {
+  const s = Number.isFinite(scale) && scale > 0 ? scale : 0.25
+  const ox = (stageW - worldW * s) / 2
+  const oy = (stageH - worldH * s) / 2
+  return { scale: s, ox, oy }
+}
+
+function isValidView(v: any): v is ViewState {
+  return (
+    v &&
+    typeof v === "object" &&
+    Number.isFinite(v.scale) &&
+    v.scale > 0 &&
+    Number.isFinite(v.ox) &&
+    Number.isFinite(v.oy)
+  )
+}
+
   /** =========================
    *  RENDER
    *  ========================= */
@@ -1039,6 +1414,10 @@ export default function EditorPage() {
         <div className="mb-4 flex flex-wrap gap-2 items-center">
           <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={triggerImport}>
             Importar Patch DMX (Excel)
+          </button>
+
+          <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={triggerProjectImport}>
+            Importar proyecto (JSON)
           </button>
 
           <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={triggerBgImport}>
@@ -1069,9 +1448,7 @@ export default function EditorPage() {
             <button className="rounded bg-neutral-800 px-3 py-1 text-sm hover:bg-neutral-700" onClick={resetView}>
               Reset vista
             </button>
-            <div className="text-xs text-neutral-400 ml-2">
-              Zoom: {(view.scale * 100).toFixed(0)}% • Pan: Space + arrastrar • Rueda: zoom
-            </div>
+            <div className="text-xs text-neutral-400 ml-2">Zoom: {(view.scale * 100).toFixed(0)}% • Pan: Space + arrastrar • Rueda: zoom</div>
           </div>
 
           <label className="ml-2 flex items-center gap-2 text-sm text-neutral-300 select-none">
@@ -1120,6 +1497,8 @@ export default function EditorPage() {
             <button className="rounded bg-neutral-800 px-3 py-2 text-sm hover:bg-neutral-700" onClick={exportJson}>
               Exportar JSON
             </button>
+
+            {statusMsg ? <div className="text-xs text-neutral-300 max-w-[520px] truncate">{statusMsg}</div> : null}
           </div>
 
           <input
@@ -1142,6 +1521,18 @@ export default function EditorPage() {
             onChange={(e) => {
               const f = e.target.files?.[0]
               if (f) onImportBg(f)
+              e.currentTarget.value = ""
+            }}
+          />
+
+          <input
+            ref={projectJsonInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) onImportProjectJson(f)
               e.currentTarget.value = ""
             }}
           />
@@ -1425,16 +1816,23 @@ export default function EditorPage() {
                                 ev.target.position({ x: 0, y: -handleOffset })
                               }}
                             >
-                              <Rect x={-handleR} y={-handleR} width={handleR * 2} height={handleR * 2} cornerRadius={handleR} fill="#111827" stroke={audioStroke} strokeWidth={2} />
+                              <Rect
+                                x={-handleR}
+                                y={-handleR}
+                                width={handleR * 2}
+                                height={handleR * 2}
+                                cornerRadius={handleR}
+                                fill="#111827"
+                                stroke={audioStroke}
+                                strokeWidth={2}
+                              />
                             </Group>
                           </>
                         ) : null}
 
                         <Group rotation={-rot}>
                           <Text text={fx.label ?? baseLabel} x={-80} y={-46} fontSize={12} fill={COLORS.label} />
-                          {typeof fx.quantity === "number" ? (
-                            <Text text={`x${fx.quantity}`} x={-80} y={-30} fontSize={11} fill={COLORS.subLabel} />
-                          ) : null}
+                          {typeof fx.quantity === "number" ? <Text text={`x${fx.quantity}`} x={-80} y={-30} fontSize={11} fill={COLORS.subLabel} /> : null}
                         </Group>
                       </Group>
                     )
@@ -1681,100 +2079,116 @@ export default function EditorPage() {
               </div>
 
               <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
-                <div className="font-semibold">Visual</div>
-                <div>
-                  <label className="mb-1 block text-sm">Tamaño (px en plano)</label>
-                  <input
-                    type="number"
-                    value={selectedFixture.sizePx ?? DEFAULT_DMX_SIZE}
-                    onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: Number(e.target.value) } as Partial<DmxFixture>)}
-                    className="w-full rounded bg-neutral-800 px-2 py-2"
-                  />
+                <div className="text-sm text-neutral-300">Patch</div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-sm">Universe</label>
+                    <input
+                      className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                      value={universeInput}
+                      onChange={(e) => setUniverseInput(e.target.value)}
+                      onBlur={() => {
+                        const u = clamp(Number(universeInput || 1), 1, 99)
+                        updateFixture(selectedFixture.uid, { universe: u } as any)
+                        setUniverseInput(String(u))
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-sm">Address</label>
+                    <input
+                      className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                      value={addressInput}
+                      onChange={(e) => setAddressInput(e.target.value)}
+                      onBlur={() => {
+                        const a = clamp(Number(addressInput || 1), 1, 512)
+                        updateFixture(selectedFixture.uid, { address: a } as any)
+                        setAddressInput(String(a))
+                      }}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                <label className="mb-1 block text-sm">Tipo</label>
-                <select
-                  value={selectedFixture.type}
-                  onChange={(e) => {
-                    const type = e.target.value as DmxType
-                    const defaultMode = DMX_CATALOG[type].modes[0].id
-                    updateFixture(selectedFixture.uid, { type, modeId: defaultMode } as Partial<DmxFixture>)
-                  }}
-                  className="w-full rounded bg-neutral-800 px-2 py-2"
-                >
-                  {(Object.keys(DMX_CATALOG) as DmxType[]).map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm">Modo</label>
-                <select value={selectedFixture.modeId} onChange={(e) => updateFixture(selectedFixture.uid, { modeId: e.target.value } as Partial<DmxFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2">
-                  {DMX_CATALOG[selectedFixture.type].modes.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} ({m.channels}ch)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-sm">Universe</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={universeInput}
-                    onChange={(e) => /^\d*$/.test(e.target.value) && setUniverseInput(e.target.value)}
-                    onBlur={() => {
-                      const n = Number(universeInput)
-                      const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
-                      setUniverseInput(String(safe))
-                      updateFixture(selectedFixture.uid, { universe: safe } as Partial<DmxFixture>)
+                  <label className="mb-1 block text-sm">Tipo</label>
+                  <select
+                    className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    value={selectedFixture.type}
+                    onChange={(e) => {
+                      const t = e.target.value as DmxType
+                      const modeId = DMX_CATALOG[t].modes[0].id
+                      updateFixture(selectedFixture.uid, { type: t, modeId } as any)
                     }}
-                    className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-                  />
+                  >
+                    {dmxTypes.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div>
-                  <label className="mb-1 block text-sm">Address</label>
+                  <label className="mb-1 block text-sm">Modo</label>
+                  <select
+                    className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    value={selectedFixture.modeId}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { modeId: e.target.value } as any)}
+                  >
+                    {DMX_CATALOG[selectedFixture.type].modes.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} ({m.channels}ch)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm">Tamaño (px)</label>
                   <input
-                    type="text"
-                    inputMode="numeric"
-                    value={addressInput}
-                    onChange={(e) => /^\d*$/.test(e.target.value) && setAddressInput(e.target.value)}
-                    onBlur={() => {
-                      const n = Number(addressInput)
-                      const safe = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
-                      setAddressInput(String(safe))
-                      updateFixture(selectedFixture.uid, { address: safe } as Partial<DmxFixture>)
-                    }}
-                    className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    type="range"
+                    min={10}
+                    max={120}
+                    step={1}
+                    value={Math.round(selectedFixture.sizePx ?? DEFAULT_DMX_SIZE)}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: Number(e.target.value) } as any)}
+                  />
+                  <div className="text-xs text-neutral-400 tabular-nums">{Math.round(selectedFixture.sizePx ?? DEFAULT_DMX_SIZE)} px</div>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm">Zona (texto)</label>
+                  <input
+                    className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    value={selectedFixture.zona ?? ""}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value || undefined } as any)}
+                    placeholder="Ej: ESCENARIO / PISTA / VIP..."
                   />
                 </div>
-              </div>
 
-              <div>
-                <label className="mb-1 block text-sm">Zona (texto libre)</label>
-                <input type="text" value={selectedFixture.zona ?? ""} onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<DmxFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500" />
+                {selectedIssues.length > 0 ? (
+                  <div className="rounded border border-red-700/50 bg-red-950/30 p-3">
+                    <div className="font-semibold text-red-300">Problemas DMX</div>
+                    <ul className="mt-2 space-y-1 text-sm text-red-200">
+                      {selectedIssues.map((it, idx) =>
+                        it.kind === "OUT_OF_RANGE" ? (
+                          <li key={idx}>
+                            Fuera de rango: U{it.universe} {it.start}-{it.end}
+                          </li>
+                        ) : (
+                          <li key={idx}>
+                            Solape en U{it.universe} con {it.withUid}
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                ) : (
+                  <div className="text-sm text-green-300">Sin conflictos DMX detectados.</div>
+                )}
               </div>
-
-              <button
-                className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
-                onClick={() => {
-                  setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
-                  setSelectedUid(null)
-                  setUniverseInput("")
-                  setAddressInput("")
-                }}
-              >
-                Borrar este objeto
-              </button>
             </div>
           )}
 
@@ -1783,121 +2197,135 @@ export default function EditorPage() {
             <div className="space-y-4">
               <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3">
                 <div className="text-sm text-neutral-300">Seleccionado (NO-DMX)</div>
-                <div className="mt-1 font-semibold">{ND_CATALOG[selectedFixture.type].label}</div>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm">Etiqueta / Nombre</label>
-                <input
-                  type="text"
-                  value={selectedFixture.label ?? ""}
-                  onChange={(e) => updateFixture(selectedFixture.uid, { label: e.target.value } as Partial<NdFixture>)}
-                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm">Zona (texto libre)</label>
-                <input
-                  type="text"
-                  value={selectedFixture.zona ?? ""}
-                  onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value } as Partial<NdFixture>)}
-                  className="w-full rounded bg-neutral-800 px-2 py-2 outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
-                />
-              </div>
-
-              {ndKind2(selectedFixture.type) === "SCREEN" ? (
-                <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
-                  <div className="font-semibold">Pantalla</div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-sm">Ancho (m)</label>
-                      <input type="number" value={selectedFixture.widthM ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { widthM: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm">Alto (m)</label>
-                      <input type="number" value={selectedFixture.heightM ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { heightM: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-sm">Ancho en plano (px)</label>
-                      <input type="number" value={selectedFixture.widthPx ?? 220} onChange={(e) => updateFixture(selectedFixture.uid, { widthPx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm">Alto en plano (px)</label>
-                      <input type="number" value={selectedFixture.heightPx ?? 120} onChange={(e) => updateFixture(selectedFixture.uid, { heightPx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-sm">Módulos</label>
-                      <input type="number" value={selectedFixture.modules ?? 0} onChange={(e) => updateFixture(selectedFixture.uid, { modules: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm">Procesador</label>
-                      <input type="text" value={selectedFixture.processor ?? ""} onChange={(e) => updateFixture(selectedFixture.uid, { processor: e.target.value } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-neutral-400">widthM/heightM se guardan para rider/PDF. El tamaño visual lo controlas con widthPx/heightPx.</div>
+                <div className="mt-1 font-semibold">
+                  {selectedFixture.id} — {ND_CATALOG[selectedFixture.type].label}
                 </div>
-              ) : null}
+                <div className="mt-1 text-sm text-neutral-300">
+                  Tipo: <span className="font-semibold">{ndKind2(selectedFixture.type)}</span>
+                </div>
+              </div>
 
-              {ndKind2(selectedFixture.type) === "AUDIO" ? (
-                <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
-                  <div className="font-semibold">Audio (orientación)</div>
+              <div className="rounded border border-neutral-800 bg-neutral-900/30 p-3 space-y-3">
+                <div className="text-sm text-neutral-300">Datos</div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-sm">Cantidad</label>
-                      <input type="number" value={selectedFixture.quantity ?? 1} onChange={(e) => updateFixture(selectedFixture.uid, { quantity: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
+                <div>
+                  <label className="mb-1 block text-sm">Etiqueta</label>
+                  <input
+                    className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    value={selectedFixture.label ?? ""}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { label: e.target.value || undefined } as any)}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm">Zona (texto)</label>
+                  <input
+                    className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                    value={selectedFixture.zona ?? ""}
+                    onChange={(e) => updateFixture(selectedFixture.uid, { zona: e.target.value || undefined } as any)}
+                    placeholder="Ej: ESCENARIO / PISTA / VIP..."
+                  />
+                </div>
+
+                {ndKind2(selectedFixture.type) === "SCREEN" ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-sm">Ancho (m)</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.widthM ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { widthM: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-sm">Alto (m)</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.heightM ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { heightM: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <label className="mb-1 block text-sm">Tamaño (px)</label>
-                      <input type="number" value={selectedFixture.sizePx ?? DEFAULT_AUDIO_SIZE} onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: Number(e.target.value) } as Partial<NdFixture>)} className="w-full rounded bg-neutral-800 px-2 py-2" />
-                    </div>
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-3 items-center">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-sm">Ancho (px)</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.widthPx ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { widthPx: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-sm">Alto (px)</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.heightPx ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { heightPx: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-sm">Módulos</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.modules ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { modules: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-sm">Procesador</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.processor ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { processor: e.target.value || undefined } as any)}
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-sm">Cantidad</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.quantity ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { quantity: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-sm">Tamaño (px)</label>
+                        <input
+                          className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
+                          value={selectedFixture.sizePx ?? ""}
+                          onChange={(e) => updateFixture(selectedFixture.uid, { sizePx: e.target.value === "" ? undefined : Number(e.target.value) } as any)}
+                        />
+                      </div>
+                    </div>
+
                     <div>
                       <label className="mb-1 block text-sm">Rotación (°)</label>
                       <input
-                        type="number"
+                        className="w-full rounded bg-neutral-800 px-2 py-2 text-sm outline-none ring-1 ring-neutral-700 focus:ring-neutral-500"
                         value={selectedFixture.rotation ?? 0}
-                        onChange={(e) => {
-                          const n = Number(e.target.value)
-                          const safe = Number.isFinite(n) ? clamp(Math.round(n), 0, 360) : 0
-                          updateFixture(selectedFixture.uid, { rotation: safe } as Partial<NdFixture>)
-                        }}
-                        className="w-full rounded bg-neutral-800 px-2 py-2"
+                        onChange={(e) => updateFixture(selectedFixture.uid, { rotation: Number(e.target.value) } as any)}
                       />
+                      <div className="text-xs text-neutral-400">En el plano: arrastra el handle (Shift para snap 15°). Doble click para reset.</div>
                     </div>
-                    <div>
-                      <label className="mb-1 block text-sm">Slider</label>
-                      <input type="range" min={0} max={360} value={selectedFixture.rotation ?? 0} onChange={(e) => updateFixture(selectedFixture.uid, { rotation: Number(e.target.value) } as Partial<NdFixture>)} className="w-full" />
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-neutral-400">SHIFT = snap 15°. Doble click = reset 0°.</div>
-                </div>
-              ) : null}
-
-              <button
-                className="w-full rounded bg-red-600 px-3 py-2 text-sm hover:bg-red-500"
-                onClick={() => {
-                  setFixtures((prev) => prev.filter((f) => f.uid !== selectedFixture.uid))
-                  setSelectedUid(null)
-                }}
-              >
-                Borrar este objeto
-              </button>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </section>
+
+        <div className="text-xs text-neutral-500">
+          Fondo y coordenadas del mundo se trabajan en píxeles del PNG. Zoom/pan manual ya implementado.
+        </div>
       </aside>
     </main>
   )
