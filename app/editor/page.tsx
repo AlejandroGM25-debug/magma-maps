@@ -5,6 +5,8 @@ import { Stage, Layer, Rect, Text, Group, Line, Circle, Image as KonvaImage } fr
 import type Konva from "konva"
 import * as XLSX from "xlsx"
 
+import { exportRiderPdf } from "../lib/riderPdf"
+
 /* =====================================================================================
    MAGMA MAP EDITOR - SINGLE FILE (Next.js /app/editor/page.tsx)
    - Sin imports internos duplicados
@@ -1347,12 +1349,31 @@ export default function EditorPage() {
     history.snapshot({ fixtures: fx.fixtures, zones: zo.zones })
   }, [history, fx.fixtures, zo.zones])
 
-  const handleUndo = useCallback(() => {
-    const prev = history.undo({ fixtures: fx.fixtures, zones: zo.zones })
-    if (!prev) return
-    fx.setAllFixtures(prev.fixtures)
-    zo.setAllZones(prev.zones)
-  }, [history, fx, zo])
+  const onExportPdf = useCallback(async () => {
+  const stage = stageRef.current
+  if (!stage) return
+
+  await exportRiderPdf({
+    projectName: "MAGMA CLUB",
+    stage,
+    fixtures: fx.fixtures,
+    zones: zo.zones,
+    exportedJsonName: "magma-map.json",
+
+    dmxCatalog: DMX_CATALOG,
+    ndCatalog: ND_CATALOG,
+    getChannels,
+
+    logoPath: "/magma-logo.png",
+  })
+}, [stageRef, fx.fixtures, zo.zones])
+
+const handleUndo = useCallback(() => {
+  const prev = history.undo({ fixtures: fx.fixtures, zones: zo.zones })
+  if (!prev) return
+  fx.setAllFixtures(prev.fixtures)
+  zo.setAllZones(prev.zones)
+}, [history, fx, zo])
 
   const handleRedo = useCallback(() => {
     const next = history.redo({ fixtures: fx.fixtures, zones: zo.zones })
@@ -1724,6 +1745,13 @@ export default function EditorPage() {
             </button>
             {statusMsg && <span className="text-xs text-neutral-300 max-w-[400px] truncate">{statusMsg}</span>}
           </div>
+
+            <button
+           className="rounded bg-red-600 px-3 py-2 text-sm font-medium hover:bg-red-500"
+            onClick={onExportPdf}
+>
+              Exportar PDF
+              </button>
 
           <input
             ref={fileInputRef}
